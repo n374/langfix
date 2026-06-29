@@ -2,7 +2,7 @@ import Foundation
 
 /// 编排 AIClient + 最小改动护栏（短句豁免 / 超阈值 strict 重试 / 取较小改动版 / overEdited）。
 /// 参见 docs/architecture/modules/ai-client.md §5 与 docs/decisions/0004-minimal-edit-guard.md。
-final class ReviewEngine {
+final class ReviewEngine: Sendable {
 
     private let client: ReviewProviding
     init(client: ReviewProviding = AIClient()) { self.client = client }

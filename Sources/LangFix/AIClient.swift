@@ -1,38 +1,36 @@
 import Foundation
 
 /// 供 ReviewEngine 依赖与测试注入的抽象：输入文本 → 校验过的 ReviewResult。
-protocol ReviewProviding {
+protocol ReviewProviding: Sendable {
     func review(text: String, config: AppConfig, mode: AIClient.Mode) async throws -> ReviewResult
 }
 
 /// 调 OpenAI 兼容 Chat Completions，做结构化输出三级降级 + 客户端校验 + 基准一致性。
 /// 对上层只暴露「输入文本 → 校验过的 ReviewResult」，屏蔽端点能力差异。
+/// 无可变实例状态（探测缓存放在 actor），故 Sendable，可跨并发安全使用。
 /// 参见 docs/architecture/modules/ai-client.md。
-final class AIClient: ReviewProviding {
+final class AIClient: ReviewProviding, Sendable {
 
-    enum Mode { case firstPass, strict }
+    enum Mode: Sendable { case firstPass, strict }
 
     private let session: URLSession
     init(session: URLSession = .shared) { self.session = session }
 
-    // 端点能力探测缓存：key = "baseURL|model"，value = 已知可用的最高 tier。
-    private static var capCache: [String: StructuredMode] = [:]
-    private static let capLock = NSLock()
-
-    private static func cachedMode(for cfg: AppConfig) -> StructuredMode? {
-        capLock.lock(); defer { capLock.unlock() }
-        return capCache["\(cfg.baseURL)|\(cfg.model)"]
+    // 端点能力探测缓存（actor 保证并发安全）：key = "baseURL|model" → 已知可用的最高 tier。
+    private actor CapabilityCache {
+        private var map: [String: StructuredMode] = [:]
+        func get(_ key: String) -> StructuredMode? { map[key] }
+        func set(_ key: String, _ mode: StructuredMode) { map[key] = mode }
     }
-    private static func setCachedMode(_ m: StructuredMode, for cfg: AppConfig) {
-        capLock.lock(); defer { capLock.unlock() }
-        capCache["\(cfg.baseURL)|\(cfg.model)"] = m
-    }
+    private static let cap = CapabilityCache()
+    private static func cacheKey(_ cfg: AppConfig) -> String { "\(cfg.baseURL)|\(cfg.model)" }
 
     // MARK: - 对外入口
 
     /// 返回已用本地输入校正过 original / 跑过 schema 校验的结果。失败抛 ReviewError。
     func review(text localInput: String, config cfg: AppConfig, mode: Mode) async throws -> ReviewResult {
-        let tiers = tierPlan(for: cfg)
+        let cachedMode = await Self.cap.get(Self.cacheKey(cfg))
+        let tiers = tierPlan(for: cfg, cached: cachedMode)
         var lastError: Error?
 
         for tier in tiers {
@@ -43,7 +41,7 @@ final class AIClient: ReviewProviding {
                 if finish == "length" {
                     let (content2, finish2) = try await chat(input: localInput, cfg: cfg, tier: tier, mode: mode, bumpTokens: true)
                     if finish2 != "length", let r = try? parseAndValidate(content2, localInput: localInput) {
-                        Self.setCachedMode(tier, for: cfg)
+                        await Self.cap.set(Self.cacheKey(cfg), tier)
                         return r
                     }
                     // 仍截断 → 纯文本兜底。
@@ -51,13 +49,13 @@ final class AIClient: ReviewProviding {
                 }
 
                 if let r = try? parseAndValidate(content, localInput: localInput) {
-                    Self.setCachedMode(tier, for: cfg)
+                    await Self.cap.set(Self.cacheKey(cfg), tier)
                     return r
                 }
                 // 解析失败 → 一次修复重试（仅在当前 tier）。
                 if let repaired = try? await repair(input: localInput, cfg: cfg, tier: tier, badContent: content),
                    let r = try? parseAndValidate(repaired, localInput: localInput) {
-                    Self.setCachedMode(tier, for: cfg)
+                    await Self.cap.set(Self.cacheKey(cfg), tier)
                     return r
                 }
                 // 当前 tier 解析不出来 → 降级到下一 tier。
@@ -113,13 +111,13 @@ final class AIClient: ReviewProviding {
 
     // MARK: - tier 计划
 
-    private func tierPlan(for cfg: AppConfig) -> [StructuredMode] {
+    private func tierPlan(for cfg: AppConfig, cached: StructuredMode?) -> [StructuredMode] {
         switch cfg.structuredMode {
         case .jsonSchema: return [.jsonSchema]
         case .jsonObject: return [.jsonObject]
         case .text: return [.text]
         case .auto:
-            if let cached = Self.cachedMode(for: cfg) { return [cached] }
+            if let cached { return [cached] }
             return [.jsonSchema, .jsonObject, .text]
         }
     }

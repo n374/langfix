@@ -47,8 +47,8 @@ enum Prompt {
     你上一条回复不是合法 JSON 或缺字段。请只输出一个符合要求的 JSON 对象（字段：has_issues, original, corrected, summary_zh, issues[{category,severity,before,after,reason_zh}], 可选 alternative），不要任何多余文字。
     """
 
-    /// json_schema tier 用的 strict schema。
-    static let jsonSchema: [String: Any] = [
+    /// json_schema tier 用的 strict schema。只读常量，故 nonisolated(unsafe) 安全。
+    nonisolated(unsafe) static let jsonSchema: [String: Any] = [
         "name": "review",
         "strict": false,   // 兼容性优先：不少中转端点对 strict=true 的完整性要求过严
         "schema": [

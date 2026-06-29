@@ -15,7 +15,8 @@ func testConfig(structured: StructuredMode = .jsonObject,
 }
 
 /// ReviewEngine 测试用的桩：按 mode 返回预设 corrected，并记录调用顺序。
-final class StubProvider: ReviewProviding {
+/// 测试串行 await 调用，calls 无并发访问，故 @unchecked Sendable。
+final class StubProvider: ReviewProviding, @unchecked Sendable {
     let firstCorrected: String
     let strictCorrected: String?
     private(set) var calls: [String] = []   // "firstPass" / "strict"

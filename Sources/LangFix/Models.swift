@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - 结构化输出模型（对应 docs/architecture/data-flow.md §3 ReviewResult）
 
-enum IssueCategory: String, Codable, CaseIterable {
+enum IssueCategory: String, Codable, CaseIterable, Sendable {
     case grammar, spelling, word_choice, naturalness, tone, punctuation
 
     /// 未知类别一律落到 naturalness，保证解析不因模型乱填类别而失败。
@@ -22,7 +22,7 @@ enum IssueCategory: String, Codable, CaseIterable {
     }
 }
 
-enum IssueSeverity: String, Codable {
+enum IssueSeverity: String, Codable, Sendable {
     case error, improvement, optional
 
     static func lenient(_ s: String) -> IssueSeverity {
@@ -38,7 +38,7 @@ enum IssueSeverity: String, Codable {
     }
 }
 
-struct Issue: Codable, Identifiable {
+struct Issue: Codable, Identifiable, Sendable {
     let id = UUID()
     var category: IssueCategory
     var severity: IssueSeverity
@@ -78,7 +78,7 @@ struct Issue: Codable, Identifiable {
     }
 }
 
-struct ReviewResult: Codable {
+struct ReviewResult: Codable, Sendable {
     var hasIssues: Bool
     var original: String
     var corrected: String
@@ -127,7 +127,7 @@ struct ReviewResult: Codable {
 
 // MARK: - 引擎调用快照（从 SettingsStore + KeychainStore 组装，传给 AIClient）
 
-struct AppConfig {
+struct AppConfig: Sendable {
     var baseURL: String
     var apiKey: String
     var model: String
@@ -152,13 +152,13 @@ struct AppConfig {
     }
 }
 
-enum StructuredMode: String, CaseIterable {
+enum StructuredMode: String, CaseIterable, Sendable {
     case auto, jsonSchema = "json_schema", jsonObject = "json_object", text
 }
 
 // MARK: - 错误
 
-enum ReviewError: LocalizedError {
+enum ReviewError: LocalizedError, Sendable {
     case notConfigured([String])     // 缺失字段
     case emptyInput
     case tooLong(Int, Int)           // 实际长度, 上限

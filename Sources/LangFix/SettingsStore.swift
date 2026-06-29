@@ -2,6 +2,8 @@ import Foundation
 import Combine
 
 /// 非敏感配置：UserDefaults。API key 不在此处（见 KeychainStore，红线 Constraint-1）。
+/// @MainActor：仅在主线程（Coordinator / SettingsView）访问；引擎只拿其 config() 快照。
+@MainActor
 final class SettingsStore: ObservableObject {
     static let shared = SettingsStore()
 

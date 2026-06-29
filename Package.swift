@@ -7,15 +7,15 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "LangFix",
-            path: "Sources/LangFix",
-            // 首版用 Swift 5 语言模式，先把功能跑通，避免与严格并发检查纠缠；
-            // 后续可逐文件迁移到 Swift 6 strict concurrency。
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            path: "Sources/LangFix"
+            // 默认 Swift 6 语言模式（strict concurrency）。
         ),
         .testTarget(
             name: "LangFixTests",
             dependencies: ["LangFix"],
             path: "Tests/LangFixTests",
+            // 测试 target 暂留 Swift 5：mock server 用 NWListener @Sendable 闭包捕获 self，
+            // 迁移成本高且与产品代码正交；产品代码已是 Swift 6。
             swiftSettings: [.swiftLanguageMode(.v5)]
         )
     ]
