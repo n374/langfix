@@ -102,15 +102,15 @@ return result   // 护栏从不阻断出结果，始终返回一版
 
 ## 8. 覆盖测试（待落地）
 
-- T1→T2→T3 降级：`TBD(unit: mock 端点返回 400 → 断言降级到下一 tier)`
-- schema 校验失败触发修复重试：`TBD(unit: 非法 JSON → 一次重试 → 合法)`
-- 截断处理：`TBD(unit: finish_reason=length → 断言提高 max_tokens 重发一次)`
-- refusal 处理：`TBD(unit: refusal 响应 → 走修复重试 → 仍失败则纯文本退化)`
-- original 回显不符：`TBD(unit: 回显 original≠输入 → 断言以本地输入为基准)`
-- 过度改写触发 strict 重试：`TBD(unit: 构造 editRatio>阈值 → 断言 strict 模式被调用)`
-- 短句豁免：`TBD(unit: origWords<6 且必要替换 → 断言跳过护栏、不触发 strict)`
-- 注入防御：`TBD(unit: 注入样例 → 断言输出仍是合法 ReviewResult 且未自由改写)`
-- 日志不含文本：`TBD(unit: 断言日志输出不包含 original/corrected 内容)`
+- T1→T2→T3 降级：`AIClientTests.swift::testAutoDegradesFrom400ToSuccess`
+- 截断 bump 重试：`AIClientTests.swift::testFinishReasonLengthTriggersBumpRetry`
+- original 回显不符 → 以本地输入为基准：`AIClientTests.swift::testBaselineOriginalOverriddenByLocalInput`
+- json_object 正常路径：`AIClientTests.swift::testJSONObjectHappyPath`
+- 鉴权失败：`AIClientTests.swift::testAuthErrorThrows`
+- 过度改写触发 strict 重试（护栏在 ReviewEngine）：`ReviewEngineGuardTests.swift::testStrictRetryResolvesUnderThreshold`
+- 短句豁免：`ReviewEngineGuardTests.swift::testShortSentenceExemptsGuard` / `testMinAbsEditsExemption`
+- 端到端（真实 socket）：`MockServerE2ETests.swift::{testHappyPathOverRealSocket, testGuardTriggersStrictRetryOverRealSocket, testAuthErrorOverRealSocket}`
+- 待补 TBD：schema 修复重试、refusal、注入防御、日志不含文本
 
 ## 9. 关联
 

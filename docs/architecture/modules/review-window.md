@@ -79,7 +79,7 @@
 
 ## 7. 覆盖测试（待落地）
 
-- diff 计算正确性：`TBD(unit: DiffEngine 对若干 original/corrected 断言编辑序列与 editRatio)`
+- diff 计算正确性：`DiffEngineTests.swift::{testSingleWordReplacement, testInsertionAndDeletionCounted, testIdenticalHasNoEdits, testTokenizePreservesWordsAndSeparators}`
 - 复制修正结果写剪贴板：`TBD(ui: 点击复制 → 断言 NSPasteboard.string == corrected)`
 - 无问题态展示：`TBD(ui: has_issues=false → 断言显示「无明显错误」且不展示删改高亮)`
 
