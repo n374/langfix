@@ -11,6 +11,12 @@ let package = Package(
             // 首版用 Swift 5 语言模式，先把功能跑通，避免与严格并发检查纠缠；
             // 后续可逐文件迁移到 Swift 6 strict concurrency。
             swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .testTarget(
+            name: "LangFixTests",
+            dependencies: ["LangFix"],
+            path: "Tests/LangFixTests",
+            swiftSettings: [.swiftLanguageMode(.v5)]
         )
     ]
 )

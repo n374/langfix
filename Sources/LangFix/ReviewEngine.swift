@@ -4,8 +4,8 @@ import Foundation
 /// 参见 docs/architecture/modules/ai-client.md §5 与 docs/decisions/0004-minimal-edit-guard.md。
 final class ReviewEngine {
 
-    private let client: AIClient
-    init(client: AIClient = AIClient()) { self.client = client }
+    private let client: ReviewProviding
+    init(client: ReviewProviding = AIClient()) { self.client = client }
 
     /// 输入边界校验 + 配置完整性校验在调用前由 Controller 完成；此处专注 AI + 护栏。
     func review(text localInput: String, config cfg: AppConfig) async throws -> ReviewResult {

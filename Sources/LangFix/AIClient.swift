@@ -1,9 +1,14 @@
 import Foundation
 
+/// 供 ReviewEngine 依赖与测试注入的抽象：输入文本 → 校验过的 ReviewResult。
+protocol ReviewProviding {
+    func review(text: String, config: AppConfig, mode: AIClient.Mode) async throws -> ReviewResult
+}
+
 /// 调 OpenAI 兼容 Chat Completions，做结构化输出三级降级 + 客户端校验 + 基准一致性。
 /// 对上层只暴露「输入文本 → 校验过的 ReviewResult」，屏蔽端点能力差异。
 /// 参见 docs/architecture/modules/ai-client.md。
-final class AIClient {
+final class AIClient: ReviewProviding {
 
     enum Mode { case firstPass, strict }
 
