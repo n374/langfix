@@ -11,6 +11,10 @@
 - AI：**OpenAI 兼容端点**（base URL / key / model 全可配），结构化输出三级降级
 - 密钥进 Keychain，消息内容不落盘
 
+## 安装
+
+`./build.sh dmg` 生成 `dist/LangFix-<版本>.dmg`，打开后把 LangFix 拖到 Applications 即可（首次启动被拦：右键 → 打开）。详见 [INSTALL.md](./INSTALL.md)。
+
 ## 文档
 
 完整设计文档（背景 / 架构 / spec / 决策记录）见 [`docs/`](./docs/README.md)。

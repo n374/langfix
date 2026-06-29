@@ -2,17 +2,17 @@
 
 > macOS 13+，需先装好 [PopClip](https://www.popclip.app/)。
 
-## 1. 构建与安装
+## 1. 安装
 
-```bash
-# 仅构建到 build/LangFix.app
-./build.sh
+**方式一（推荐，直接拖拽安装）**：打开 `dist/LangFix-<版本>.dmg`，把 **LangFix** 拖到 **Applications**。
 
-# 构建 + 安装到 /Applications + 注册 macOS Service（推荐）
-./build.sh install
-```
+- 自己生成 dmg：`./build.sh dmg` → 产出 `dist/LangFix-<版本>.dmg`
+- 首次启动被 Gatekeeper 拦（未公证）：**右键 App → 打开**，或终端执行
+  `xattr -dr com.apple.quarantine /Applications/LangFix.app`
 
-`install` 会把 `LangFix.app` 拷到 `/Applications`，并执行 `lsregister` + `pbs -update`，让 macOS Service 能被 PopClip 调用。
+**方式二（开发者，直装并注册 Service）**：`./build.sh install` —— 拷到 `/Applications` 并执行 `lsregister` + `pbs -update`。
+
+> 仅想要 `.app` 不要 dmg：`./build.sh`（产出 `build/LangFix.app`）。
 
 ## 2. 首次启动与配置
 
