@@ -1,0 +1,7 @@
+# popclip
+name: LangFix
+icon: symbol:checkmark.seal
+service name: Proofread with LangFix
+requirements: [text]
+# 可选：仅在特定 App 出现（去掉注释并按需填 bundle id）
+# required apps: [com.tencent.xinWeChat, ru.keepcoder.Telegram, com.hnc.Discord]
