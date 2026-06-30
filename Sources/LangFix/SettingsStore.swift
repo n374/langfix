@@ -17,6 +17,7 @@ final class SettingsStore: ObservableObject {
     @Published var minWordsForGuard: Int { didSet { d.set(minWordsForGuard, forKey: K.minWordsForGuard) } }
     @Published var minAbsEdits: Int { didSet { d.set(minAbsEdits, forKey: K.minAbsEdits) } }
     @Published var structuredModeRaw: String { didSet { d.set(structuredModeRaw, forKey: K.structuredMode) } }
+    @Published var streamingEnabled: Bool { didSet { d.set(streamingEnabled, forKey: K.streamingEnabled) } }
 
     private enum K {
         static let baseURL = "baseURL"
@@ -27,6 +28,7 @@ final class SettingsStore: ObservableObject {
         static let minWordsForGuard = "minWordsForGuard"
         static let minAbsEdits = "minAbsEdits"
         static let structuredMode = "structuredMode"
+        static let streamingEnabled = "streamingEnabled"
     }
 
     private init() {
@@ -37,6 +39,7 @@ final class SettingsStore: ObservableObject {
             K.minWordsForGuard: 6,
             K.minAbsEdits: 2,
             K.structuredMode: StructuredMode.auto.rawValue,
+            K.streamingEnabled: true,   // 默认开启流式（旧用户升级后默认 true）
         ])
         baseURL = d.string(forKey: K.baseURL) ?? ""
         model = d.string(forKey: K.model) ?? ""
@@ -46,6 +49,7 @@ final class SettingsStore: ObservableObject {
         minWordsForGuard = d.integer(forKey: K.minWordsForGuard)
         minAbsEdits = d.integer(forKey: K.minAbsEdits)
         structuredModeRaw = d.string(forKey: K.structuredMode) ?? StructuredMode.auto.rawValue
+        streamingEnabled = d.bool(forKey: K.streamingEnabled)   // register 默认 true → 未设置时返回 true
     }
 
     var structuredMode: StructuredMode {
@@ -63,7 +67,8 @@ final class SettingsStore: ObservableObject {
             diffThreshold: diffThreshold,
             minWordsForGuard: minWordsForGuard,
             minAbsEdits: minAbsEdits,
-            structuredMode: structuredMode
+            structuredMode: structuredMode,
+            streamingEnabled: streamingEnabled
         )
     }
 }

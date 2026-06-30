@@ -125,6 +125,34 @@ struct ReviewResult: Codable, Sendable {
     }
 }
 
+// MARK: - 流式预览值（独立于 ReviewResult，不污染其 hasIssues/overEdited 不变式）
+
+/// 流式期间的「校对预览」快照：仅供 UI 渲染，永不参与正确性判定（最终真相恒为 parseAndValidate）。
+/// 见 docs/changes/streaming-incremental-render/design.md §2.3 / §2.4。
+struct StreamingPreview: Sendable {
+    /// corrected 稳定前缀（打字机逐字输出，单调不回退）。
+    var corrected: String
+    /// summary_zh：字符串闭合后整体填充（不逐字）。
+    var summaryZh: String?
+    /// 仅「已完整闭合」的 issue object（避免半张卡片乱跳）。
+    var issues: [Issue]
+    /// alternative：字符串闭合后整体填充。
+    var alternative: String?
+    /// 阶段：接收中 / 定稿中（含护栏 strict 冻结、瞬时回退定稿）。
+    var stage: Stage
+
+    enum Stage: Sendable { case receiving, finalizing }
+
+    init(corrected: String = "", summaryZh: String? = nil, issues: [Issue] = [],
+         alternative: String? = nil, stage: Stage = .receiving) {
+        self.corrected = corrected
+        self.summaryZh = summaryZh
+        self.issues = issues
+        self.alternative = alternative
+        self.stage = stage
+    }
+}
+
 // MARK: - 引擎调用快照（从 SettingsStore + KeychainStore 组装，传给 AIClient）
 
 struct AppConfig: Sendable {
@@ -137,6 +165,8 @@ struct AppConfig: Sendable {
     var minWordsForGuard: Int
     var minAbsEdits: Int
     var structuredMode: StructuredMode
+    /// 是否对请求开启 `stream:true`（真流式增量渲染）。默认 true，存于 UserDefaults（非敏感）。
+    var streamingEnabled: Bool
 
     var isComplete: Bool {
         !baseURL.trimmed.isEmpty && !apiKey.trimmed.isEmpty && !model.trimmed.isEmpty
