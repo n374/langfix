@@ -168,7 +168,7 @@ shouldStream = cfg.streamingEnabled && streamCache[key] != .unsupported   // 未
 | D3 增量解析 | 自研 schema-aware 容错扫描器（预览专用） | 第三方 parser / 正则 | 无现成库；fail-closed；最终真相仍是 `parseAndValidate` | §2.4 |
 | D4 是否流式判据 | 仅「开关 AND 端点支持」；流式能力缓存独立于结构化 tier | 把结构化降级也当回退 | proposal Q2 拍板；正交职责 | proposal §6 Q2 |
 | D5 strict 轮是否流式 | **不流式**：冻结第一版预览、切 `.finalizing`、strict 走既有非流式 | strict 也流式 | 避免双打字机交叉闪烁；strict 复用 100% 既有测试代码 | proposal §6 Q1 |
-| D6 strict **请求失败**兜底 | firstPass 超阈值但 strict **throw** 时 → 定稿 firstPass + `overEdited=true`；**统一应用于 `review` 与 `reviewStreaming`** | 仅流式兜底（行为不对称）/ 维持现状抛错 | 与 Constraint-3「护栏不阻断出结果」一致；避免「关开关行为变差」；ADR-0004 未规定 strict-throw 路径（仅规定「strict 返回后仍超阈值」）。两位评审共识采纳 | §7、ADR-0004 |
+| D6 strict **请求失败**兜底 | firstPass 超阈值但 strict **throw** 时 → 定稿 firstPass + `overEdited=true`；**统一应用于 `review` 与 `reviewStreaming`**（**用户 2026-06-30 拍板：选项 A 统一硬化**） | 仅流式兜底（行为不对称）/ 维持现状抛错 | 与 Constraint-3「护栏不阻断出结果」一致；避免「关开关行为变差」；ADR-0004 未规定 strict-throw 路径（仅规定「strict 返回后仍超阈值」）。两位评审共识采纳、用户已背书 | §7、ADR-0004 |
 | D7 截断 finish_reason==length | 切 `.finalizing` 冻结预览、后台 bump/非流式定稿，**不擦预览、不标流式不支持** | 直接回退非流式擦掉预览 | Codex 高-3：已显示预览不应被擦成空 | §2.5 |
 | D8 text tier preview | 所有 tier 都走 JSON 字段扫描器；raw-text 仅最终 parse 失败时兜底 | text tier 直接把累积文本当 corrected | Codex 高-1：本仓库 text tier 仍是 JSON，直接当 corrected 会显示整段 JSON | §2.4、§8 Q1 |
 
@@ -218,16 +218,16 @@ shouldStream = cfg.streamingEnabled && streamCache[key] != .unsupported   // 未
 - [x] **未触及红线判定逻辑**，无需强制覆盖记录：
   - **Constraint-1（key 只进 Keychain）**：本 change 不碰密钥存储路径。
   - **Constraint-2（不记录内容）**：`StreamingPreview` 仅存活于内存与 UI，**不写日志、不落盘**；SSE delta 不进日志（日志仍只允许 requestId/耗时/token/状态码）。
-  - **Constraint-3（最小改动护栏不可破坏）**：editRatio 仍在**完整 corrected** 上算、短句豁免、超阈值 strict 重试、取较小版、`overEdited` 置位**算法全部一字不动**；diff 仍仅在完整 corrected 定稿时渲染（流式期间无 diff）。**唯一新增**是 D6——strict **请求自身网络失败**（throw，非「返回后仍超阈值」）时定稿 firstPass + `overEdited`。ADR-0004 §2.3 仅规定「strict 返回后仍超阈值 → 展示较小版」，**未规定 strict-throw 路径**；本兜底填补该空白且与红线明文「护栏不阻断出结果、始终展示一个结果」**同向**，不削弱护栏。**结论：属错误路径硬化，非护栏算法变更，不构成红线触碰。** 仍在 §10 后续动作请用户对此知情背书。
+  - **Constraint-3（最小改动护栏不可破坏）**：editRatio 仍在**完整 corrected** 上算、短句豁免、超阈值 strict 重试、取较小版、`overEdited` 置位**算法全部一字不动**；diff 仍仅在完整 corrected 定稿时渲染（流式期间无 diff）。**唯一新增**是 D6——strict **请求自身网络失败**（throw，非「返回后仍超阈值」）时定稿 firstPass + `overEdited`。ADR-0004 §2.3 仅规定「strict 返回后仍超阈值 → 展示较小版」，**未规定 strict-throw 路径**；本兜底填补该空白且与红线明文「护栏不阻断出结果、始终展示一个结果」**同向**，不削弱护栏。**结论：属错误路径硬化，非护栏算法变更，不构成红线触碰。** 用户已于 2026-06-30 背书选项 A（统一硬化 `review` + `reviewStreaming`）。
   - **Constraint-4（不改原选区）**：不涉及。
 
 ## 8. Clarifications（含红线强制覆盖）
 
 ### Q1: spec「纯文本模式仍流式」与本仓库 `.text` tier 实现不一致，如何落地？
-**A**: spec/proposal 的心智模型是「text tier = 端点吐纯文本」，但本仓库 `.text` tier 实际只是**不加 `response_format`**，Prompt 仍要求 JSON、`parseAndValidate` 仍按 JSON 解析（`AIClient.swift:139` 的 `.text` 分支 + `Prompt.system` 仍要 JSON）。因此设计**遵从代码事实**：所有 tier 的 preview 都走 JSON 字段扫描器；「累积原始文本直接当 corrected」仅在最终 `parseAndValidate` 彻底失败时作兜底（既有 `ReviewResult.fallback`）。这样「纯文本端点也流式」（流照常发生、issues 可空）与「不把整段 JSON 当修正文」两个目标同时满足。**该澄清不改 spec 行为意图，只校正实现假设；提请编排官/用户知情。**
+**A**: spec/proposal 的心智模型是「text tier = 端点吐纯文本」，但本仓库 `.text` tier 实际只是**不加 `response_format`**，Prompt 仍要求 JSON、`parseAndValidate` 仍按 JSON 解析（`AIClient.swift:139` 的 `.text` 分支 + `Prompt.system` 仍要 JSON）。因此设计**遵从代码事实**：所有 tier 的 preview 都走 JSON 字段扫描器；「累积原始文本直接当 corrected」仅在最终 `parseAndValidate` 彻底失败时作兜底（既有 `ReviewResult.fallback`）。这样「纯文本端点也流式」（流照常发生、issues 可空）与「不把整段 JSON 当修正文」两个目标同时满足。**该澄清不改 spec 行为意图，只校正实现假设。用户已于 2026-06-30 确认理解一致。**
 
 ### Q2: D6 strict-throw 兜底是否需要红线强制覆盖？
-**A**: 不需要（见 §7 论证）。它不改 editRatio/阈值/重试触发，只在 strict 请求 throw 时按「护栏不阻断出结果」定稿 firstPass。两位评审共识采纳。仍列入 §10 请用户背书。
+**A**: 不需要（见 §7 论证）。它不改 editRatio/阈值/重试触发，只在 strict 请求 throw 时按「护栏不阻断出结果」定稿 firstPass。两位评审共识采纳，**用户 2026-06-30 拍板选项 A（统一硬化）**。
 
 ### 红线强制覆盖记录
 不适用（本 change 未触碰任何红线判定逻辑）。
@@ -258,7 +258,7 @@ shouldStream = cfg.streamingEnabled && streamCache[key] != .unsupported   // 未
   7. （中）`\uXXXX` 按 UTF-16 代理对成对输出（§2.4）。
   8. （低）瞬时断流不永久污染 stream 缓存（§2.5 表）；补「取消/旧任务污染」状态机测试（§5）。
 - **反驳的 Codex 意见**：无（Round-2 全部为有效缺陷或增强，悉数采纳）。
-- **剩余分歧**：无。D6 与 §8 Q1 两点虽已共识采纳，仍提请用户在 §11 知情背书（前者错误路径硬化、后者校正 spec 实现假设）。
+- **剩余分歧**：无。D6 与 §8 Q1 两点已共识采纳，**用户 2026-06-30 拍板：D6 选项 A（统一硬化）、Q1 确认理解一致**——设计全部定稿，可进入开发。
 
 ## 11. 验收要点（交给开发官，含 dev↔test 内循环）
 
@@ -273,8 +273,8 @@ shouldStream = cfg.streamingEnabled && streamCache[key] != .unsupported   // 未
 
 ## 12. 后续动作建议（用于触发联动）
 
-- [ ] **请用户背书 D6**（strict-throw 兜底统一到 `review()`，§7/§8 Q2）——属护栏错误路径硬化，需用户对「护栏相邻代码改动」知情同意。
-- [ ] **请用户/编排官确认 §8 Q1**（text tier 实现假设校正，不改 spec 意图）。
+- [x] **D6 已获用户背书**（2026-06-30，选项 A：strict-throw 兜底统一到 `review` + `reviewStreaming`，§7/§8 Q2）。
+- [x] **§8 Q1 已获用户确认**（2026-06-30，text tier 实现假设校正，不改 spec 意图）。
 - [ ] 实现阶段同步更新 `docs/architecture/data-flow.md`（时序图加 loading→streaming→finalizing→result；diff 仅终态；错误表加「流式不可用→静默非流式回退」；Schema 章节注明 partial parser 仅预览）。
 - [ ] 实现阶段更新模块文档 `docs/architecture/modules/ai-client.md`（SSE 解析 / 流式能力缓存 / 回退分类）、`review-window.md`（streaming 态 / 预览标记 / 复制禁用 / 取消语义）。
 - [ ] 归档阶段把 spec-delta 中 `TBD(...)` 覆盖测试替换为真实测试路径。
