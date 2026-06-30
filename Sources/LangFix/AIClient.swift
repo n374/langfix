@@ -3,6 +3,23 @@ import Foundation
 /// 供 ReviewEngine 依赖与测试注入的抽象：输入文本 → 校验过的 ReviewResult。
 protocol ReviewProviding: Sendable {
     func review(text: String, config: AppConfig, mode: AIClient.Mode) async throws -> ReviewResult
+
+    /// 流式入口：增量解析时通过 `onPreview` 顺序回吐预览快照，返回最终（已校验）结果。
+    /// 默认实现（见下方 extension）回落到非流式 `review`，发一次「整体作为终值」的 preview，
+    /// 故既有 conformer（含 StubProvider）无需强改即可编译。AIClient override 提供真流式。
+    func reviewStreaming(text: String, config: AppConfig, mode: AIClient.Mode,
+                         onPreview: @MainActor @Sendable (StreamingPreview) async -> Void) async throws -> ReviewResult
+}
+
+extension ReviewProviding {
+    /// 默认实现：非流式拿最终结果，再发一次 `.finalizing` 整体预览。
+    func reviewStreaming(text: String, config: AppConfig, mode: AIClient.Mode,
+                         onPreview: @MainActor @Sendable (StreamingPreview) async -> Void) async throws -> ReviewResult {
+        let r = try await review(text: text, config: config, mode: mode)
+        await onPreview(StreamingPreview(corrected: r.corrected, summaryZh: r.summaryZh,
+                                         issues: r.issues, alternative: r.alternative, stage: .finalizing))
+        return r
+    }
 }
 
 /// 调 OpenAI 兼容 Chat Completions，做结构化输出三级降级 + 客户端校验 + 基准一致性。
@@ -24,6 +41,21 @@ final class AIClient: ReviewProviding, Sendable {
     }
     private static let cap = CapabilityCache()
     private static func cacheKey(_ cfg: AppConfig) -> String { "\(cfg.baseURL)|\(cfg.model)" }
+
+    // 流式能力缓存（正交于结构化 tier 缓存）：决定是否加 `stream:true`。
+    // 协议级不支持（200 非 SSE / 400-stream / 全程无 data: 帧）才缓存 unsupported；
+    // 瞬时断流不污染（最多本次回退）。见 design §2.5。
+    enum StreamSupport: Sendable { case unknown, supported, unsupported }
+    private actor StreamCache {
+        private var map: [String: StreamSupport] = [:]
+        func get(_ key: String) -> StreamSupport { map[key] ?? .unknown }
+        func set(_ key: String, _ v: StreamSupport) { map[key] = v }
+    }
+    private static let streamCap = StreamCache()
+
+    /// 流式不可用的内部信号：`cacheUnsupported` 标记是否为「协议级不支持」需缓存。
+    /// 仅在 AIClient 内部传递，最终被 reviewStreaming 捕获并回退非流式（对上层透明）。
+    private struct StreamFallback: Error { let cacheUnsupported: Bool }
 
     // MARK: - 对外入口
 
@@ -77,6 +109,186 @@ final class AIClient: ReviewProviding, Sendable {
             return ReviewResult.fallback(localInput: localInput, note: "解析失败，已尽力展示原文")
         }
         throw lastError ?? ReviewError.decode("未知错误")
+    }
+
+    // MARK: - 流式入口（override 协议默认实现，提供真流式）
+
+    /// 真流式 review：内部镜像 `review` 的 tier 循环，但每次尝试走 SSE 流式；
+    /// 增量 delta 经 PartialReviewParser 转预览，顺序 `await onPreview`。
+    /// 流式不可用（协议级或瞬时）一律静默回退非流式 `review`，对上层透明（见 design §2.5）。
+    func reviewStreaming(text localInput: String, config cfg: AppConfig, mode: Mode,
+                         onPreview: @MainActor @Sendable (StreamingPreview) async -> Void) async throws -> ReviewResult {
+        let key = Self.cacheKey(cfg)
+        // 仅当开关开 AND 端点未知/已知支持流式才尝试；已知不支持 → 直接静默非流式（preview 未发出，用户无感）。
+        guard cfg.streamingEnabled, await Self.streamCap.get(key) != .unsupported else {
+            return try await review(text: localInput, config: cfg, mode: mode)
+        }
+        do {
+            return try await streamingReview(input: localInput, cfg: cfg, mode: mode, onPreview: onPreview)
+        } catch let fallback as StreamFallback {
+            if fallback.cacheUnsupported { await Self.streamCap.set(key, .unsupported) }
+            // 回退非流式定稿（preview 若已发出，UI 维持「校对预览中」，定稿后切最终结果，不弹错）。
+            return try await review(text: localInput, config: cfg, mode: mode)
+        }
+        // 其余 ReviewError（auth/rateLimited/server/cancelled）按既有错误路径上抛。
+    }
+
+    /// 流式版 tier 循环：镜像 `review`，差异在于首次请求走 `streamChat`。
+    private func streamingReview(input localInput: String, cfg: AppConfig, mode: Mode,
+                                 onPreview: @MainActor @Sendable (StreamingPreview) async -> Void) async throws -> ReviewResult {
+        let key = Self.cacheKey(cfg)
+        let cachedMode = await Self.cap.get(key)
+        let tiers = tierPlan(for: cfg, cached: cachedMode)
+        var lastError: Error?
+
+        for tier in tiers {
+            do {
+                var parser = PartialReviewParser()
+                let (content, finish) = try await streamChat(input: localInput, cfg: cfg, tier: tier,
+                                                             mode: mode, parser: &parser, onPreview: onPreview)
+
+                // 截断：切 .finalizing 冻结预览，后台非流式 bump 重发一次（D7：不擦预览）。
+                if finish == "length" {
+                    await onPreview(parser.snapshot(stage: .finalizing))
+                    let (content2, finish2) = try await chat(input: localInput, cfg: cfg, tier: tier, mode: mode, bumpTokens: true)
+                    if finish2 != "length", let r = try? parseAndValidate(content2, localInput: localInput) {
+                        await Self.cap.set(key, tier)
+                        await Self.streamCap.set(key, .supported)
+                        return r
+                    }
+                    return ReviewResult.fallback(localInput: localInput, note: "结果被截断，已尽力展示原文")
+                }
+
+                if let r = try? parseAndValidate(content, localInput: localInput) {
+                    await Self.cap.set(key, tier)
+                    await Self.streamCap.set(key, .supported)
+                    return r
+                }
+                // 解析失败 → 非流式修复重试（仅当前 tier）。
+                if let repaired = try? await repair(input: localInput, cfg: cfg, tier: tier, badContent: content),
+                   let r = try? parseAndValidate(repaired, localInput: localInput) {
+                    await Self.cap.set(key, tier)
+                    return r
+                }
+                lastError = ReviewError.decode("tier \(tier.rawValue) 流式内容无法解析为合法 ReviewResult")
+            } catch let e as ReviewError {
+                switch e {
+                case .server(let code) where code == 400:
+                    // response_format 结构化问题 → tier 降级（仍尝试流式）。
+                    lastError = e
+                    continue
+                default:
+                    throw e   // 鉴权/网络/限流/取消等上抛
+                }
+            }
+            // StreamFallback 不在此 catch，故会冒泡到 reviewStreaming（协议级/瞬时回退）。
+        }
+
+        if let re = lastError as? ReviewError, case .decode = re {
+            return ReviewResult.fallback(localInput: localInput, note: "解析失败，已尽力展示原文")
+        }
+        throw lastError ?? ReviewError.decode("未知错误")
+    }
+
+    /// 单次流式请求：发 `stream:true`，逐行解析 SSE，累积 delta.content，喂 parser 触发 onPreview。
+    /// 返回 (累积完整 content, 末帧 finish_reason)。流式不可用/瞬时异常抛 StreamFallback。
+    private func streamChat(input: String, cfg: AppConfig, tier: StructuredMode, mode: Mode,
+                            parser: inout PartialReviewParser,
+                            onPreview: @MainActor @Sendable (StreamingPreview) async -> Void) async throws -> (content: String, finish: String?) {
+        var req = try makeRequest(cfg: cfg)
+        var body: [String: Any] = [
+            "model": cfg.model,
+            "temperature": cfg.temperature,
+            "stream": true,
+            "messages": [
+                ["role": "system", "content": Prompt.system(mode: mode)],
+                ["role": "user", "content": Prompt.user(input)],
+            ],
+        ]
+        switch tier {
+        case .jsonSchema:
+            body["response_format"] = ["type": "json_schema", "json_schema": Prompt.jsonSchema]
+        case .jsonObject:
+            body["response_format"] = ["type": "json_object"]
+        case .text, .auto:
+            break
+        }
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let bytes: URLSession.AsyncBytes
+        let resp: URLResponse
+        do {
+            (bytes, resp) = try await session.bytes(for: req)
+        } catch is CancellationError {
+            throw ReviewError.cancelled
+        } catch let urlErr as URLError where urlErr.code == .cancelled {
+            throw ReviewError.cancelled
+        } catch {
+            throw ReviewError.network(error.localizedDescription)
+        }
+
+        guard let http = resp as? HTTPURLResponse else { throw ReviewError.network("无 HTTP 响应") }
+        switch http.statusCode {
+        case 200...299: break
+        case 401, 403: throw ReviewError.auth
+        case 429: throw ReviewError.rateLimited
+        case 400:
+            // 保留并分类 400 body：stream 不支持 → 回退缓存；否则当 response_format 结构化问题 → tier 降级。
+            let bodyText = (try? await Self.collect(bytes)) ?? ""
+            let lower = bodyText.lowercased()
+            if lower.contains("stream") { throw StreamFallback(cacheUnsupported: true) }
+            throw ReviewError.server(400)
+        default:
+            throw ReviewError.server(http.statusCode)
+        }
+
+        // 200：逐行读 SSE。
+        var accumulated = ""
+        var finish: String? = nil
+        var sawDataFrame = false
+        do {
+            for try await line in bytes.lines {
+                if Task.isCancelled { throw ReviewError.cancelled }
+                guard line.hasPrefix("data:") else { continue }   // 非 SSE 数据行忽略（注释/事件名等）
+                sawDataFrame = true
+                let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                if payload == "[DONE]" { break }
+                guard let pdata = payload.data(using: .utf8),
+                      let chunk = try? JSONDecoder().decode(StreamChunk.self, from: pdata),
+                      let choice = chunk.choices.first else { continue }
+                if let f = choice.finishReason { finish = f }
+                if let delta = choice.delta?.content, !delta.isEmpty {
+                    accumulated += delta
+                    if let preview = parser.feed(delta) { await onPreview(preview) }
+                }
+            }
+        } catch let e as ReviewError {
+            throw e   // cancelled
+        } catch is CancellationError {
+            throw ReviewError.cancelled
+        } catch let urlErr as URLError where urlErr.code == .cancelled {
+            throw ReviewError.cancelled
+        } catch {
+            // 流读取中途异常（半截流 / 临时 EOF / SSE 解码偶发失败）= 瞬时，非协议级。
+            if sawDataFrame {
+                await onPreview(parser.snapshot(stage: .finalizing))   // 冻结已显示预览
+                throw StreamFallback(cacheUnsupported: false)          // 本次非流式定稿，不缓存
+            }
+            throw StreamFallback(cacheUnsupported: true)               // 从未拿到 SSE → 协议级不支持
+        }
+
+        if !sawDataFrame {
+            // 200 但 body 非 SSE / 全程无 data: 帧 → 协议级不支持流式。
+            throw StreamFallback(cacheUnsupported: true)
+        }
+        return (accumulated, finish)
+    }
+
+    /// 把 AsyncBytes 收集为完整字符串（仅用于读 400 错误 body 做分类）。
+    private static func collect(_ bytes: URLSession.AsyncBytes) async throws -> String {
+        var data = Data()
+        for try await b in bytes { data.append(b) }
+        return String(decoding: data, as: UTF8.self)
     }
 
     // MARK: - 测试连接
@@ -258,6 +470,18 @@ private struct ChatResponse: Decodable {
         let message: Message
         let finishReason: String?
         enum CodingKeys: String, CodingKey { case message; case finishReason = "finish_reason" }
+    }
+    let choices: [Choice]
+}
+
+// MARK: - 流式 SSE chunk（OpenAI chat.completion.chunk）
+
+private struct StreamChunk: Decodable {
+    struct Choice: Decodable {
+        struct Delta: Decodable { let content: String? }
+        let delta: Delta?            // 个别帧可能缺 delta（如纯 usage 帧）→ 可空
+        let finishReason: String?
+        enum CodingKeys: String, CodingKey { case delta; case finishReason = "finish_reason" }
     }
     let choices: [Choice]
 }
