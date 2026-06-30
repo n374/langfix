@@ -63,19 +63,25 @@
 | 语气 切换 | 以 `keep/casual/formal` 临时重跑（二次 refine，不改默认） | — |
 | Esc / 点窗外 | 关闭 | — |
 | loading 中取消 | 中止请求、关窗 | R5 |
+| streaming 中取消 | 中止流式请求、关窗（语义同 loading） | R5 / 流式态可取消 |
 
 > **不提供**「替换原选区」（V1 红线 Constraint-4）。
 > 「复制解释 / 重新检查 / 语气切换」为便利项，**不纳入 V1 强制验收**（见 [spec §2.1](../../specs/grammar-review/spec.md)）；V1 验收只要求「复制修正结果」可靠。
 
 ## 6. 状态
 
+对应 `ReviewState.Phase`：`loading / streaming(StreamingPreview) / result(ReviewResult) / error`。
+
 | 状态 | 展示 |
 |---|---|
 | loading | 进度指示 + 可取消（R5） |
-| 成功·有问题 | 完整布局 |
+| streaming（校对预览中） | 「校对预览中…/定稿中…」徽标 + corrected 逐字预览（打字机）+ 已闭合 issue 卡片；**无词级 diff、复制禁用、可取消**。`StreamingPreview` 为预览专用值（独立于 `ReviewResult`），由 `PartialReviewParser` 增量产出，**永不参与正确性**（见 [ai-client.md §3.5](./ai-client.md)）。preview 回调 `@MainActor` 顺序 `await`，带 generation/取消屏障 + 单调前缀守卫，杜绝旧任务污染/取消后更新已关窗 |
+| 成功·有问题 | 完整布局（去预览标记、终态才出词级 diff） |
 | 成功·无问题 | 状态条「✓ 无明显错误」，corrected==original，可显示一条 optional（R11） |
 | overEdited | 顶部 ⚠️ banner「AI 改动较大，请核对」 |
 | 错误 | 错误文案 + 重试/设置入口（R7） |
+
+> **预览→定稿**：流式期间为 `.streaming` 预览（无 diff），护栏复核（含 strict 重试）完成后切 `.result`，去「校对预览中」标记并渲染完整 corrected + 词级 diff + issues。strict 覆盖预览第一版被呈现为「预览→定稿」收敛，而非错误闪烁。
 
 ## 7. 覆盖测试（待落地）
 

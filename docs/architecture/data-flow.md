@@ -36,6 +36,50 @@ sequenceDiagram
   U->>RW: 复制修正结果 / 二次操作 / Esc 关闭
 ```
 
+## 1.1 流式增量渲染时序（streamingEnabled=true 且端点支持流式）
+
+把「等完整结果再渲染」（`loading → result`）升级为「预览→定稿」（`loading → streaming → result`）。
+「流式仅在非护栏路径生效」的语义从**事前判定**重构为**事后定稿**：firstPass 走流式预览，
+护栏复核（含 strict 重试）始终在**完整 corrected** 上跑、仍是唯一真相。详见
+[changes/streaming-incremental-render/design.md](../changes/streaming-incremental-render/design.md)。
+
+```mermaid
+sequenceDiagram
+  participant CO as AppCoordinator(@MainActor)
+  participant RE as ReviewEngine
+  participant AC as AIClient
+  participant EP as AI 端点
+  participant RW as ReviewWindow
+
+  CO->>RW: phase = .loading
+  CO->>RE: reviewStreaming(text, cfg, onPreview)
+  RE->>AC: reviewStreaming(.firstPass, onPreview)
+  AC->>EP: POST /chat/completions (stream:true, tier)
+  EP-->>AC: SSE data: delta.content（逐帧）
+  AC->>AC: PartialReviewParser.feed → corrected 稳定前缀（预览专用）
+  AC-->>CO: onPreview(corrected, .receiving)   // @MainActor 顺序、带 generation 屏障
+  CO->>RW: phase = .streaming(preview)          // 「校对预览中」、无 diff、复制禁用、可取消
+  EP-->>AC: data: [DONE]
+  AC->>AC: parseAndValidate(完整 content)        // 唯一真相、基准一致性
+  AC-->>RE: firstPass ReviewResult
+  RE->>RE: editStats 护栏（ADR-0004 不变）
+  alt 未触发护栏
+    RE-->>CO: 返回 result
+  else 触发护栏（firstPass 超阈值）
+    RE-->>CO: onPreview(.finalizing)             // 冻结预览第一版
+    RE->>AC: review(.strict)                     // 既有非流式，复用
+    AC-->>RE: strict result（或 throw → D6 兜底 firstPass+overEdited）
+    RE-->>CO: 返回定稿 result
+  end
+  CO->>RW: phase = .result(最终结果 + 词级 diff)  // 去预览标记、终态才出 diff
+```
+
+**关键约束**：
+- **PartialReviewParser 仅供预览**，有 bug 最多让预览不理想；最终输出永远由 `parseAndValidate` 决定（§3）。
+- **是否流式只看两点**：流式开关 AND 端点支持流式。结构化 tier 降级、strict 重试、repair、截断重发**都不是回退理由**，统一走「预览→定稿」收敛。
+- **流式能力缓存独立于结构化 tier 缓存**（正交）；端点不支持流式 → 静默回退非流式（见 §5）。
+- **词级 diff 仍仅在完整 corrected 定稿时渲染**，流式期间无 diff（红线 Constraint-3 未被破坏）。
+
 ## 2. 输入
 
 - **来源**：PopClip Service action 发送的**纯文本**（`public.utf8-plain-text`）。
@@ -72,6 +116,8 @@ sequenceDiagram
 5. **截断/拒答**：若响应 `finish_reason == "length"`（被 max_tokens 截断）或返回非法/不完整 JSON 或 refusal → 进「修复/重试」（见下）。
 6. 校验失败 → 一次「修复重试」（把校验错误回传给模型要求修正；截断则提高 max_tokens 重发一次）；再失败 → 退化为「纯文本展示（以本地输入为 corrected）+ 错误提示」。
 
+> **流式预览的解析（preview-only）**：流式期间由 `PartialReviewParser`（schema-aware 容错增量扫描器）从累积 SSE 文本逐字提取 `corrected` 稳定前缀 + 已闭合的结构化字段，仅用于 `.streaming` 态预览渲染（`StreamingPreview` 值，独立于 `ReviewResult`）。**它永不参与正确性**：流结束后完整 content 仍走上述同一套 `parseAndValidate` 作唯一真相。本仓库 `.text` tier 仍是 JSON（只是不加 `response_format`），故**所有 tier 的预览都走 JSON 字段扫描器**，「累积原始文本直接当 corrected」仅在最终 `parseAndValidate` 彻底失败时兜底。
+
 ## 4. 过度改写护栏（最小改动闸）
 
 详见 [ADR-0004](../decisions/0004-minimal-edit-guard.md)。
@@ -91,6 +137,9 @@ sequenceDiagram
 | 鉴权失败 401/403 | 提示「检查 API key / 端点」并给设置入口（R7） |
 | 限流 429 | 提示稍后重试，可附 backoff（R7） |
 | 端点不支持 `json_schema` | AIClient 自动降级 `json_object` → 纯文本解析（R6） |
+| 端点不支持流式（200 非 SSE / 400-stream / 半截断流） | **静默回退非流式**完整渲染，不弹错；协议级不支持缓存 unsupported，瞬时断流不缓存（最多本次回退） |
+| 流式截断 `finish_reason=length` | 切 `.finalizing` 冻结预览、后台非流式 bump 定稿，**不擦预览、不标流式不支持** |
+| 流式 strict 重试请求自身 throw（D6） | 定稿 firstPass + `overEdited`（与「护栏不阻断出结果」同向；统一应用于 `review` 与 `reviewStreaming`） |
 | 模型返回非法 JSON | 修复重试一次 → 仍失败则纯文本展示（R6） |
 | `finish_reason=length`（被截断）| 提高 max_tokens 重发一次 → 仍截断则纯文本展示并提示（R6） |
 | refusal / 非 schema 文本 | 视为校验失败走修复重试 → 仍失败则纯文本展示（R6） |

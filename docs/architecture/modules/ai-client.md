@@ -44,6 +44,27 @@
 - `auto` 探测结果按 `baseURL+model` 缓存（内存即可），避免每次都从 T1 试。
 - **无论哪个 Tier，拿到文本后都做同一套客户端 schema 校验**（见 [data-flow.md §3](../data-flow.md)）。
 
+## 3.5 流式（reviewStreaming）：SSE 解析 / 流式能力缓存 / 回退分类
+
+> 详见 [changes/streaming-incremental-render/design.md](../../changes/streaming-incremental-render/design.md)。`reviewStreaming` 是**并行新增入口**，既有 `review`/`chat`/`probe` 一字不改。
+
+- **SSE 解析**：`URLSession.bytes(for:)` → `for try await line in bytes.lines`，取 `data:` 前缀帧、累积 `choices[0].delta.content`、`data:[DONE]`/流结束收尾、末帧捕获 `finish_reason`。`URLResponse` 状态码在读 body 前即可拿到，故 **tier 降级循环照常包裹流式尝试**。增量 `delta` 喂 `PartialReviewParser` 转 `StreamingPreview`，经 `@MainActor` 顺序 `await onPreview`。
+- **流式能力缓存（`StreamSupport`，独立 actor，正交于结构化 tier 缓存）**：key=`baseURL|model`，`unknown` 时乐观尝试（不加探测 RTT）。`shouldStream = streamingEnabled && cache != .unsupported`。
+- **回退分类**（保留并分类 400 body，避免既有 `chat` 抛 `.server(400)` 丢 body）：
+
+| 现象 | 判定 | 动作 | 缓存 unsupported |
+|---|---|---|---|
+| 200 但全程无 `data:` 帧（body 非 SSE） | 协议级不支持 | 静默回退非流式 | 是 |
+| 400 且 body 含 `stream` | 协议级不支持 | 静默回退非流式 | 是 |
+| 400 且 body 指向 `response_format`/结构化 | tier 问题 | 既有 tier 降级（仍流式） | 否 |
+| 半截断流 / 临时 EOF / SSE 偶发解码失败 | 瞬时异常 | 切 `.finalizing` 本次非流式定稿 | 否（最多 TTL） |
+| `finish_reason==length` | 截断 | 切 `.finalizing` 冻结预览、后台非流式 bump | 否 |
+| 最终完整 content `parseAndValidate` 失败 | 解析问题 | 既有 repair / 降级 / 兜底 | 否 |
+| 401/403/429/5xx | 鉴权/限流/服务端 | 按既有错误路径上抛 | 否 |
+
+- **回退可见性**：preview 尚未发出 → 全静默重跑非流式（用户无感）；preview 已发出后半截异常 → 维持「校对预览中」切 `.finalizing`、后台非流式定稿成功后再标「最终结果」，**不弹错**。
+- **协议默认实现**：`ReviewProviding.reviewStreaming` 由 protocol extension 给默认实现（非流式 `review` + 一次 `.finalizing` 整体 preview），`StubProvider` 等既有 conformer 不强改；`AIClient` override 提供真流式。
+
 ## 4. 校验与修复重试
 
 ```
@@ -86,6 +107,9 @@ return result   // 护栏从不阻断出结果，始终返回一版
 
 护栏**不可默认关闭**（红线 Constraint-3）。默认 `diffThreshold=0.35 / minWordsForGuard=6 / minAbsEdits=2`，按评测集（NFR-3）调参。
 
+`reviewStreaming` 复用**同一套护栏算法**（editRatio 仍在完整 corrected 上算），仅 firstPass 走流式拿预览；strict 轮**不流式**（冻结预览切 `.finalizing` 后走既有非流式 `review(.strict)`）。
+**D6（统一硬化，用户拍板选项 A）**：当 strict 请求自身 **throw**（网络失败等，非「返回后仍超阈值」）时，按「护栏不阻断出结果」定稿 firstPass + `overEdited`，**统一应用于 `review` 与 `reviewStreaming`**（不吞 `.cancelled`）。该兜底填补 ADR-0004 未规定的 strict-throw 路径，不改 editRatio/阈值/重试触发，不构成红线触碰。
+
 ## 6. 错误映射（→ UI / spec R7）
 
 | HTTP / 异常 | 用户可见提示 | 动作 |
@@ -100,8 +124,9 @@ return result   // 护栏从不阻断出结果，始终返回一版
 
 只记 `requestId / 耗时ms / promptTokens / completionTokens / httpStatus / tier / 错误类型`。**绝不记录** `original` / `corrected` / `messages` 文本。
 
-## 8. 覆盖测试（待落地）
+## 8. 覆盖测试
 
+**非流式（既有，回归全绿）**：
 - T1→T2→T3 降级：`AIClientTests.swift::testAutoDegradesFrom400ToSuccess`
 - 截断 bump 重试：`AIClientTests.swift::testFinishReasonLengthTriggersBumpRetry`
 - original 回显不符 → 以本地输入为基准：`AIClientTests.swift::testBaselineOriginalOverriddenByLocalInput`
@@ -110,6 +135,16 @@ return result   // 护栏从不阻断出结果，始终返回一版
 - 过度改写触发 strict 重试（护栏在 ReviewEngine）：`ReviewEngineGuardTests.swift::testStrictRetryResolvesUnderThreshold`
 - 短句豁免：`ReviewEngineGuardTests.swift::testShortSentenceExemptsGuard` / `testMinAbsEditsExemption`
 - 端到端（真实 socket）：`MockServerE2ETests.swift::{testHappyPathOverRealSocket, testGuardTriggersStrictRetryOverRealSocket, testAuthErrorOverRealSocket}`
+
+**流式（新增）**：
+- SSE 解析正常路径：`AIClientStreamingTests.swift::testStreamingHappyPathParsesSSE`
+- 200 非 SSE / 400-stream / 400-response_format / 半截流回退：`AIClientStreamingTests.swift::{test200NonSSEFallsBackSilently, test400StreamUnsupportedFallsBack, test400ResponseFormatDegradesTierStaysStreaming, testMidStreamErrorFallsBackAndRecovers}`
+- 截断切 `.finalizing` + 非流式 bump：`AIClientStreamingTests.swift::testFinishReasonLengthBumpsNonStreaming`
+- 开关关闭不带 stream / 鉴权上抛：`AIClientStreamingTests.swift::{testStreamingDisabledSilentNonStreaming, testStreamingAuthErrorPropagates}`
+- 增量解析器（跨 chunk / 代理对 / 半截 / 乱序 / .text tier / malformed）：`PartialReviewParserTests.swift`（16 例）
+- 护栏流式定稿 + D6 + 取消透传：`ReviewEngineStreamingTests.swift`（8 例）
+- 端到端（首字早于末字 / 流式非流式一致 / 静默回退 / 开关）：`StreamingE2ETests.swift`（4 例）
+
 - 待补 TBD：schema 修复重试、refusal、注入防御、日志不含文本
 
 ## 9. 关联
