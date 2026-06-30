@@ -7,11 +7,12 @@ func testConfig(structured: StructuredMode = .jsonObject,
                 minAbs: Int = 2,
                 baseURL: String = "https://example.test/v1",
                 apiKey: String = "test-key",
-                model: String = "test-model") -> AppConfig {
+                model: String = "test-model",
+                streaming: Bool = true) -> AppConfig {
     AppConfig(baseURL: baseURL, apiKey: apiKey, model: model,
               temperature: 0.2, maxChars: 4000,
               diffThreshold: threshold, minWordsForGuard: minWords, minAbsEdits: minAbs,
-              structuredMode: structured)
+              structuredMode: structured, streamingEnabled: streaming)
 }
 
 /// ReviewEngine 测试用的桩：按 mode 返回预设 corrected，并记录调用顺序。
@@ -34,6 +35,28 @@ final class StubProvider: ReviewProviding, @unchecked Sendable {
         return ReviewResult(hasIssues: corrected != text, original: text,
                             corrected: corrected, summaryZh: "", issues: [])
     }
+}
+
+/// 桩：firstPass 返回预设 corrected，strict 一律 throw 指定错误（用于 D6 strict-throw 兜底测试）。
+final class ThrowingStrictStub: ReviewProviding, @unchecked Sendable {
+    let firstCorrected: String
+    let strictError: ReviewError
+    private(set) var calls: [String] = []
+
+    init(first: String, strictError: ReviewError) {
+        self.firstCorrected = first
+        self.strictError = strictError
+    }
+
+    func review(text: String, config: AppConfig, mode: AIClient.Mode) async throws -> ReviewResult {
+        if case .strict = mode {
+            calls.append("strict")
+            throw strictError
+        }
+        calls.append("firstPass")
+        return ReviewResult(hasIssues: true, original: text, corrected: firstCorrected, summaryZh: "", issues: [])
+    }
+    // reviewStreaming 用协议默认实现（非流式 + 一次 finalizing preview）。
 }
 
 /// URLProtocol 桩：拦截 URLSession 请求，按注册的 handler 返回响应。
