@@ -59,6 +59,15 @@ final class ThrowingStrictStub: ReviewProviding, @unchecked Sendable {
     // reviewStreaming 用协议默认实现（非流式 + 一次 finalizing preview）。
 }
 
+/// 桩：firstPass 一律抛 .cancelled（模拟流式途中取消），验证 reviewStreaming 透传取消、不吞不转 error。
+final class CancelOnFirstPassStub: ReviewProviding, @unchecked Sendable {
+    private(set) var calls: [String] = []
+    func review(text: String, config: AppConfig, mode: AIClient.Mode) async throws -> ReviewResult {
+        calls.append("\(mode)")
+        throw ReviewError.cancelled
+    }
+}
+
 /// URLProtocol 桩：拦截 URLSession 请求，按注册的 handler 返回响应。
 final class StubURLProtocol: URLProtocol {
     /// 返回 (statusCode, bodyData)。可用闭包内的计数器模拟多次调用的降级/截断。

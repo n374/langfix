@@ -61,6 +61,22 @@ final class ReviewEngineStreamingTests: XCTestCase {
         XCTAssertEqual(r.corrected, "AA BB CC DD EE FF")
     }
 
+    // MARK: - 取消传播（AC-6）
+
+    func testReviewStreamingPropagatesCancellation() async {
+        // 流式途中取消 → .cancelled 透传出 reviewStreaming（Coordinator 据此关窗、不应用 result、不报错）。
+        let stub = CancelOnFirstPassStub()
+        let engine = ReviewEngine(client: stub)
+        let rec = PreviewRecorder()
+        do {
+            _ = try await engine.reviewStreaming(text: input, config: testConfig()) { p in rec.record(p) }
+            XCTFail("应透传 cancelled")
+        } catch let e as ReviewError {
+            if case .cancelled = e {} else { XCTFail("期望 .cancelled，实际 \(e)") }
+        } catch { XCTFail("期望 ReviewError.cancelled") }
+        XCTAssertTrue(rec.previews.isEmpty, "取消后不应残留 preview")
+    }
+
     func testD6DoesNotSwallowCancellation() async {
         // strict 抛 .cancelled 时不走 D6 兜底，原样上抛（保留取消语义）。
         let stub = ThrowingStrictStub(first: "AA BB CC DD EE FF", strictError: .cancelled)
