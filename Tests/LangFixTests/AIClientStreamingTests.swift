@@ -85,6 +85,53 @@ final class AIClientStreamingTests: XCTestCase {
         XCTAssertTrue(StreamingStubURLProtocol.capturedBodies.last?.contains("\"stream\":true") ?? false)
     }
 
+    func testSingleTierStream400FallsBackNonStreaming() async throws {
+        // 单 tier（jsonSchema）下流式请求吃非 stream 的 400（response_format 与 stream 组合不支持），
+        // 无可降级 tier → 不应把 .server(400) 抛给用户，而是回退非流式重试并成功（Codex 高-1 修复）。
+        let content = reviewResultContent(original: "x", corrected: "nonstream recovered")
+        StreamingStubURLProtocol.handler = { _, n in
+            if n == 1 {
+                return StreamStubResponse(status: 400, contentType: "application/json",
+                                          chunks: [Data(#"{"error":"response_format is not supported when streaming"}"#.utf8)])
+            }
+            return StreamStubResponse(contentType: "application/json", chunks: [chatResponseJSON(content: content)])
+        }
+        let client = AIClient(session: streamingStubbedSession())
+        let cfg = testConfig(structured: .jsonSchema, model: "s-single400")
+        let r = try await client.reviewStreaming(text: "single tier stream input", config: cfg, mode: .firstPass) { _ in }
+        XCTAssertEqual(r.corrected, "nonstream recovered", "单 tier 流式 400 应回退非流式而非报错")
+        XCTAssertGreaterThanOrEqual(StreamingStubURLProtocol.requestCount, 2)
+    }
+
+    func testAmbiguous400NotCachedSoStreamingRetried() async throws {
+        // 含 response_format 的歧义 400（同时含 stream 字样）不得永久缓存 unsupported（Codex 中-2 修复）：
+        // 第一次回退非流式恢复；第二次 review 仍应尝试流式（有 preview）。
+        let content = reviewResultContent(original: "x", corrected: "ambiguous case ok")
+        StreamingStubURLProtocol.handler = { _, n in
+            switch n {
+            case 1:
+                return StreamStubResponse(status: 400, contentType: "application/json",
+                                          chunks: [Data(#"{"error":"response_format is not supported when stream=true"}"#.utf8)])
+            case 2:
+                return StreamStubResponse(contentType: "application/json", chunks: [chatResponseJSON(content: content)])
+            default:
+                return StreamStubResponse(chunks: sseFrames(content: content))
+            }
+        }
+        let client = AIClient(session: streamingStubbedSession())
+        let cfg = testConfig(structured: .jsonObject, model: "s-ambig400")
+
+        let rec1 = PreviewRecorder()
+        let r1 = try await client.reviewStreaming(text: "ambiguous input one", config: cfg, mode: .firstPass) { p in rec1.record(p) }
+        XCTAssertEqual(r1.corrected, "ambiguous case ok")
+        XCTAssertTrue(rec1.previews.isEmpty, "首次 400 即回退，无预览")
+
+        let rec2 = PreviewRecorder()
+        let r2 = try await client.reviewStreaming(text: "ambiguous input two", config: cfg, mode: .firstPass) { p in rec2.record(p) }
+        XCTAssertEqual(r2.corrected, "ambiguous case ok")
+        XCTAssertTrue(rec2.sawReceivingNonEmptyCorrected, "未缓存 unsupported → 第二次仍尝试流式（有预览）")
+    }
+
     func testFinishReasonLengthBumpsNonStreaming() async throws {
         let full = reviewResultContent(original: "x", corrected: "full result text")
         StreamingStubURLProtocol.handler = { _, n in

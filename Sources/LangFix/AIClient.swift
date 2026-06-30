@@ -184,8 +184,19 @@ final class AIClient: ReviewProviding, Sendable {
             // StreamFallback 不在此 catch，故会冒泡到 reviewStreaming（协议级/瞬时回退）。
         }
 
-        if let re = lastError as? ReviewError, case .decode = re {
-            return ReviewResult.fallback(localInput: localInput, note: "解析失败，已尽力展示原文")
+        if let re = lastError as? ReviewError {
+            switch re {
+            case .decode:
+                // 流式内容解析失败（流本身没问题）→ 纯文本兜底。
+                return ReviewResult.fallback(localInput: localInput, note: "解析失败，已尽力展示原文")
+            case .server:
+                // 所有可用 tier 的流式请求都吃 400（response_format/结构化与 stream 组合问题、或单 tier 无可降级）。
+                // ≠ 端点不支持流式 → 回退非流式重试（不缓存 unsupported）。非流式 review 会用同样的 tier 体系
+                // 自行成功或把真实错误抛给用户（design §2.5「模糊 400 → 先降级再回退非流式、不缓存」）。
+                throw StreamFallback(cacheUnsupported: false)
+            default:
+                break
+            }
         }
         throw lastError ?? ReviewError.decode("未知错误")
     }
@@ -233,10 +244,16 @@ final class AIClient: ReviewProviding, Sendable {
         case 401, 403: throw ReviewError.auth
         case 429: throw ReviewError.rateLimited
         case 400:
-            // 保留并分类 400 body：stream 不支持 → 回退缓存；否则当 response_format 结构化问题 → tier 降级。
-            let bodyText = (try? await Self.collect(bytes)) ?? ""
-            let lower = bodyText.lowercased()
-            if lower.contains("stream") { throw StreamFallback(cacheUnsupported: true) }
+            // 保留并分类 400 body（既有 chat 抛 .server(400) 丢了 body，故流式路径单独读取分类）：
+            // - 纯 stream 不支持 → 协议级，缓存 unsupported 并静默回退非流式；
+            // - 提到 response_format/结构化（含「response_format 与 stream 组合不支持」这类同时含 stream 的歧义文案）
+            //   → 当结构化 tier 问题降级，response_format 优先于 stream 判定，避免误把整体流式能力打死。
+            //   降级耗尽后由 streamingReview 末尾统一回退非流式（不缓存）。
+            let lower = ((try? await Self.collect(bytes)) ?? "").lowercased()
+            let mentionsRF = lower.contains("response_format") || lower.contains("response format")
+                || lower.contains("json_schema") || lower.contains("json_object")
+            let mentionsStream = lower.contains("stream")
+            if mentionsStream && !mentionsRF { throw StreamFallback(cacheUnsupported: true) }
             throw ReviewError.server(400)
         default:
             throw ReviewError.server(http.statusCode)

@@ -64,7 +64,7 @@ IF 流式开关为开但端点不支持流式（探测失败或运行时 SSE 行
 - **WHEN** AIClient 发起流式请求并识别到不支持
 - **THEN** 自动回退非流式完整渲染并正常出结果；用户无可见报错，体验与原非流式一致
 
-**覆盖测试**: `Tests/LangFixTests/AIClientStreamingTests.swift::{test200NonSSEFallsBackSilently, test400StreamUnsupportedFallsBack, test400ResponseFormatDegradesTierStaysStreaming, testMidStreamErrorFallsBackAndRecovers}`、`Tests/LangFixTests/StreamingE2ETests.swift::testSilentFallbackNoErrorPhase`
+**覆盖测试**: `Tests/LangFixTests/AIClientStreamingTests.swift::{test200NonSSEFallsBackSilently, test400StreamUnsupportedFallsBack, test400ResponseFormatDegradesTierStaysStreaming, testSingleTierStream400FallsBackNonStreaming, testAmbiguous400NotCachedSoStreamingRetried, testMidStreamErrorFallsBackAndRecovers}`、`Tests/LangFixTests/StreamingE2ETests.swift::testSilentFallbackNoErrorPhase`
 
 ### Requirement: 流式预览到定稿（与最小改动护栏共存）
 WHEN 流式输出结束且护栏复核（含 ADR-0004 可能的 strict 重试）完成 THE SYSTEM SHALL 去除「校对预览中」标记并标记为「最终结果」；护栏 strict 重试以更小改动版覆盖流式已显示的第一版时，THE SYSTEM SHALL 将其呈现为「预览→定稿」的收敛，而非错误闪烁。
