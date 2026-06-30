@@ -252,6 +252,7 @@ final class AIClient: ReviewProviding, Sendable {
             let lower = ((try? await Self.collect(bytes)) ?? "").lowercased()
             let mentionsRF = lower.contains("response_format") || lower.contains("response format")
                 || lower.contains("json_schema") || lower.contains("json_object")
+                || lower.contains("json schema") || lower.contains("json object")
             let mentionsStream = lower.contains("stream")
             if mentionsStream && !mentionsRF { throw StreamFallback(cacheUnsupported: true) }
             throw ReviewError.server(400)
