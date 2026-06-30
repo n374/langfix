@@ -90,6 +90,7 @@ struct SettingsView: View {
 
     private var generalSection: some View {
         VStack(alignment: .leading, spacing: 8) {
+            Toggle("流式渲染（逐字预览，端点不支持时自动回退）", isOn: $settings.streamingEnabled)
             Toggle("登录时启动（常驻，消除冷启动延迟）", isOn: $launchAtLogin)
                 .onChange(of: launchAtLogin) { on in setLaunchAtLogin(on) }
         }

@@ -8,6 +8,8 @@ struct ReviewView: View {
             switch state.phase {
             case .loading:
                 LoadingView(onCancel: { state.onCancel?() })
+            case .streaming(let preview):
+                StreamingPreviewView(preview: preview, onCancel: { state.onCancel?() })
             case .error(let msg):
                 ErrorView(message: msg,
                           onRetry: { state.onRetry?() },
@@ -31,6 +33,64 @@ private struct LoadingView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
+    }
+}
+
+/// 流式「校对预览中」态：增量展示 corrected 前缀 + 已闭合结构化字段。
+/// 红线：无词级 diff（依赖完整 corrected）、复制禁用（预览非最终真相）、可取消（继承 loading 语义）。
+private struct StreamingPreviewView: View {
+    let preview: StreamingPreview
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // 顶部「校对预览中」徽标（finalizing 时文案切「定稿中」）。
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Label(preview.stage == .finalizing ? "定稿中…" : "校对预览中…",
+                      systemImage: "text.cursor")
+                    .foregroundColor(.accentColor).font(.subheadline.bold())
+                Spacer()
+            }
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    // corrected 逐字预览（打字机），复制禁用、无 diff 高亮。
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("修正预览").font(.caption).foregroundColor(.secondary)
+                            Spacer()
+                            Button("复制") {}.controlSize(.small).disabled(true)   // 预览期禁用复制
+                        }
+                        Text(preview.corrected.isEmpty ? " " : preview.corrected)
+                            .textSelection(.enabled)
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color(nsColor: .textBackgroundColor))
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.gray.opacity(0.2)))
+                        if let s = preview.summaryZh, !s.trimmed.isEmpty {
+                            Text(s).font(.caption).foregroundColor(.secondary)
+                        }
+                    }
+                    // 已闭合的 issue 卡片按分区增量填充。
+                    if !preview.issues.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("逐条说明").font(.caption).foregroundColor(.secondary)
+                            ForEach(preview.issues) { issue in IssueCard(issue: issue) }
+                        }
+                    }
+                }
+                .padding(14)
+            }
+            Divider()
+            HStack {
+                Spacer()
+                Button("取消", action: onCancel).keyboardShortcut(.cancelAction)
+            }
+            .padding(.horizontal, 14).padding(.vertical, 8)
+        }
     }
 }
 

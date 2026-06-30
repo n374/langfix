@@ -10,6 +10,8 @@ final class AppCoordinator {
     private var reviewController: ReviewWindowController?
     private var settingsController: SettingsWindowController?
     private var currentTask: Task<Void, Never>?
+    /// 每次 start() 自增的代次：preview 回调只在「当前代且未取消」时应用，杜绝旧任务污染/取消后更新已关窗。
+    private var generation = 0
 
     private init() {}
 
@@ -50,20 +52,46 @@ final class AppCoordinator {
         present(state: state)
 
         currentTask?.cancel()
-        currentTask = Task { [weak self] in
-            guard let self else { return }
+        generation += 1
+        let myGen = generation
+        currentTask = Task { [weak self, weak state] in
+            guard let self, let state else { return }
+
+            // preview 回调：@MainActor 顺序 await，带代次/取消屏障 + 单调前缀守卫（design §2.7）。
+            let onPreview: @MainActor @Sendable (StreamingPreview) async -> Void = { [weak self, weak state] preview in
+                guard let self, let state else { return }
+                guard self.generation == myGen, !Task.isCancelled else { return }   // 仅当前代且未取消才应用
+                self.applyPreview(preview, to: state)
+            }
+
             do {
-                let result = try await self.engine.review(text: input, config: cfg)
-                if Task.isCancelled { return }
+                let result: ReviewResult
+                if cfg.streamingEnabled {
+                    result = try await self.engine.reviewStreaming(text: input, config: cfg, onPreview: onPreview)
+                } else {
+                    result = try await self.engine.review(text: input, config: cfg)
+                }
+                if Task.isCancelled || self.generation != myGen { return }
                 state.phase = .result(result)
             } catch let e as ReviewError {
                 if case .cancelled = e { return }
+                if self.generation != myGen { return }
                 state.phase = .error(e.errorDescription ?? "出错了")
             } catch {
-                if Task.isCancelled { return }
+                if Task.isCancelled || self.generation != myGen { return }
                 state.phase = .error(error.localizedDescription)
             }
         }
+    }
+
+    /// 应用一帧 preview，含单调前缀守卫：streaming 接收态下若新 corrected 比已显示更短则不回退覆盖。
+    private func applyPreview(_ preview: StreamingPreview, to state: ReviewState) {
+        if case .streaming(let cur) = state.phase,
+           preview.stage == .receiving,
+           preview.corrected.count < cur.corrected.count {
+            return
+        }
+        state.phase = .streaming(preview)
     }
 
     // MARK: - 窗口
