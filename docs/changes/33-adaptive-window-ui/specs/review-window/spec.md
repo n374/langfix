@@ -15,6 +15,8 @@
 THE SYSTEM SHALL 令弹窗宽度与高度均等于当前内容的自然尺寸，并各自 clamp 到屏幕相对范围——宽度 clamp 到 `[minW, maxW]`（`minW = 480pt`，`maxW = 弹窗所在屏 visibleFrame 宽度 × 0.4`），高度 clamp 到 `[minH, maxH]`（`minH` 为容纳标题栏与首行状态的内容自然高度，`maxH = 同屏 visibleFrame 高度 × 0.7`）；内容超过上限的维度在内容区内部滚动。
 
 > 约束：宽、高上限**均以屏幕相对尺寸计算**（不得用固定像素上限），使不同分辨率下上限比例一致。`minW` 用户原话「不小于 48」判读为 480pt（见 proposal §6 Q1）。
+>
+> **实现备注（非规范性，来自 design.md §8 Q1 + Codex 交叉评审）**：当屏 `visibleFrame.width < 1200pt` 时 `maxW = visibleW×0.4 < minW=480`，`[480, maxW]` 数学非法。落地采用 `maxW = max(480, visibleW×0.4)`——常规屏遵守 40% 相对上限，极窄屏以 480pt 最小可用宽兜底（此时字面超过屏 40%）。判为实现层合理降级，未改动本 Requirement 的规范语义；个人 macOS 划词工具窄于 1200pt 极罕见。若需「任何情况绝不超 40%」，改为窄屏允许低于 480 即可。
 
 #### Scenario: 短内容出小窗
 - **GIVEN** 弹窗展示的内容仅一行修正结果（自然宽/高均 < 各自上限）
