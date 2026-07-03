@@ -18,6 +18,9 @@ final class SettingsStore: ObservableObject {
     @Published var minAbsEdits: Int { didSet { d.set(minAbsEdits, forKey: K.minAbsEdits) } }
     @Published var structuredModeRaw: String { didSet { d.set(structuredModeRaw, forKey: K.structuredMode) } }
     @Published var streamingEnabled: Bool { didSet { d.set(streamingEnabled, forKey: K.streamingEnabled) } }
+    /// 弹窗主题（非敏感偏好）：只存 `ReviewThemeID.rawValue`（Material 不可 Codable），
+    /// 不进 `AppConfig`（与 AI 引擎无关）。切换即时生效由 SwiftUI @Published 触发重绘。
+    @Published var reviewThemeRaw: String { didSet { d.set(reviewThemeRaw, forKey: K.reviewTheme) } }
 
     private enum K {
         static let baseURL = "baseURL"
@@ -29,6 +32,7 @@ final class SettingsStore: ObservableObject {
         static let minAbsEdits = "minAbsEdits"
         static let structuredMode = "structuredMode"
         static let streamingEnabled = "streamingEnabled"
+        static let reviewTheme = "reviewTheme"
     }
 
     private init() {
@@ -40,6 +44,7 @@ final class SettingsStore: ObservableObject {
             K.minAbsEdits: 2,
             K.structuredMode: StructuredMode.auto.rawValue,
             K.streamingEnabled: true,   // 默认开启流式（旧用户升级后默认 true）
+            K.reviewTheme: ReviewThemeID.defaultID.rawValue,   // 默认 Aurora Glass（旧用户升级即得默认）
         ])
         baseURL = d.string(forKey: K.baseURL) ?? ""
         model = d.string(forKey: K.model) ?? ""
@@ -50,10 +55,16 @@ final class SettingsStore: ObservableObject {
         minAbsEdits = d.integer(forKey: K.minAbsEdits)
         structuredModeRaw = d.string(forKey: K.structuredMode) ?? StructuredMode.auto.rawValue
         streamingEnabled = d.bool(forKey: K.streamingEnabled)   // register 默认 true → 未设置时返回 true
+        reviewThemeRaw = d.string(forKey: K.reviewTheme) ?? ReviewThemeID.defaultID.rawValue
     }
 
     var structuredMode: StructuredMode {
         StructuredMode(rawValue: structuredModeRaw) ?? .auto
+    }
+
+    /// 当前选中的主题（非法 rawValue 自动 fallback 默认）。
+    var reviewTheme: ReviewTheme {
+        ReviewThemeCatalog.theme(ReviewThemeID(rawValueOrDefault: reviewThemeRaw))
     }
 
     /// 组装传给引擎的配置快照（含 Keychain 里的 key）。

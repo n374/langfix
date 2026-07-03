@@ -90,6 +90,16 @@ struct SettingsView: View {
 
     private var generalSection: some View {
         VStack(alignment: .leading, spacing: 8) {
+            // 弹窗主题：切换即时生效（@Published → 弹窗 SwiftUI 自动重绘），持久化到 UserDefaults。
+            field("弹窗主题") {
+                Picker("弹窗主题", selection: $settings.reviewThemeRaw) {
+                    ForEach(ReviewThemeID.allCases) { id in
+                        Text(ReviewThemeCatalog.theme(id).displayName).tag(id.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
             Toggle("流式渲染（逐字预览，端点不支持时自动回退）", isOn: $settings.streamingEnabled)
             Toggle("登录时启动（常驻，消除冷启动延迟）", isOn: $launchAtLogin)
                 .onChange(of: launchAtLogin) { on in setLaunchAtLogin(on) }
