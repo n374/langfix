@@ -1,0 +1,50 @@
+name: Build (non-release)
+
+# 非 release 构建：编译 + 单测 + 打包成可拖拽安装的 DMG，作为 workflow artifact 上传。
+# 不创建任何 GitHub Release / tag，纯 CI 产物，供测试下载。
+on:
+  workflow_dispatch: {}          # 手动触发（可在 Actions 页面对任意分支跑）
+  push:
+    branches-ignore:
+      - master                   # master 走后续正式 release 流程，这里只管非 release 包
+  pull_request:                  # PR 上验证可编译、可出包
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build macOS app + DMG
+    runs-on: macos-15            # 需 Swift 6 工具链（Package.swift: swift-tools-version 6.0）
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Unit tests
+        run: swift test
+
+      - name: Build .app and DMG
+        run: ./build.sh dmg
+
+      - name: Resolve version
+        id: ver
+        run: |
+          v="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/LangFix.app/Contents/Info.plist 2>/dev/null || echo 0.0.0)"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LangFix-${{ steps.ver.outputs.version }}-${{ github.sha }}
+          path: dist/*.dmg
+          if-no-files-found: error
+          retention-days: 14
