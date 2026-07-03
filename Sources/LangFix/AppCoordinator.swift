@@ -39,19 +39,18 @@ final class AppCoordinator {
     }
 
     private func start(input: String, cfg: AppConfig) {
+        // 新触发先汇聚关闭上一代弹窗 + 取消上一代 Task，避免旧请求泄漏（design.md §2.4）。
+        closeReviewAndCancel()
+
         let state = ReviewState()
         state.input = input
         state.phase = .loading
-        state.onCancel = { [weak self] in
-            self?.currentTask?.cancel()
-            self?.reviewController?.close()
-        }
-        state.onClose = { [weak self] in self?.reviewController?.close() }
+        // 关闭语义统一：onCancel / onClose 都汇聚到唯一幂等 cancel 路径（修复现状 onClose 不 cancel 的正确性 bug）。
+        Self.wireCloseSemantics(state: state) { [weak self] in self?.closeReviewAndCancel() }
         state.onRetry = { [weak self] in self?.start(input: input, cfg: SettingsStore.shared.config()) }
         state.onOpenSettings = { [weak self] in self?.openSettings() }
         present(state: state)
 
-        currentTask?.cancel()
         generation += 1
         let myGen = generation
         currentTask = Task { [weak self, weak state] in
@@ -94,19 +93,40 @@ final class AppCoordinator {
         state.phase = .streaming(preview)
     }
 
+    // MARK: - 关闭语义（唯一幂等 cancel 路径，design.md §2.4 / 决策 D4）
+
+    /// 关闭弹窗并取消底层 Task。幂等：重复调用安全（cancel 已取消的 Task 无副作用）。
+    /// **正确性核心**：这是关闭的唯一出口——销毁两 panel + cancel Task + 让在途 preview 回调失效。
+    private func closeReviewAndCancel() {
+        currentTask?.cancel()
+        currentTask = nil
+        generation += 1                 // 让在途 preview 回调（带旧 generation）失效
+        reviewController?.close()        // 两 panel orderOut+close、清 delegate、移除 esc monitor
+        reviewController = nil
+    }
+
+    /// 把 ReviewState 的关闭/取消回调统一汇聚到单一 cancel 闭包。
+    /// 抽成静态方法便于单测「onClose 与 onCancel 都触发 cancel」这一正确性回归（design.md §5 最高优先级）。
+    static func wireCloseSemantics(state: ReviewState, closeAndCancel: @escaping () -> Void) {
+        state.onCancel = closeAndCancel
+        state.onClose = closeAndCancel
+    }
+
     // MARK: - 窗口
 
     private func present(state: ReviewState) {
-        reviewController?.close()
         let c = ReviewWindowController(state: state)
+        // 关闭按钮 / 标题栏关闭 → 汇聚到同一 cancel 路径。
+        c.onRequestClose = { [weak self] in self?.closeReviewAndCancel() }
         reviewController = c
         c.showCentered()
     }
 
     private func present(error: String) {
+        closeReviewAndCancel()
         let state = ReviewState()
         state.phase = .error(error)
-        state.onClose = { [weak self] in self?.reviewController?.close() }
+        Self.wireCloseSemantics(state: state) { [weak self] in self?.closeReviewAndCancel() }
         state.onOpenSettings = { [weak self] in self?.openSettings() }
         present(state: state)
     }
@@ -144,47 +164,229 @@ final class AppCoordinator {
     }
 }
 
-// MARK: - 浮窗控制器（NSPanel + SwiftUI）
+// MARK: - 浮窗控制器（双 NSPanel + SwiftUI，三态窗体）
 
+/// 弹窗外壳控制器：展开 panel + 折叠胶囊 panel 共享同一 `ReviewState`（design.md §2.2 决策 D1）。
+/// - 窗口态由纯状态机 `ReviewWindowMode.reduce` 驱动（失焦/Esc→折叠、点击胶囊→展开、关闭→销毁+cancel）。
+/// - 尺寸由 `ReviewView` 上报的内容自然尺寸经 `ReviewWindowSizing` clamp + 节流 + 单调增高驱动。
 @MainActor
-final class ReviewWindowController {
-    private let panel: NSPanel
+final class ReviewWindowController: NSObject, NSWindowDelegate {
+    private let state: ReviewState
+    private let expandedPanel: NSPanel
+    private let capsulePanel: NSPanel
+    private var expandedHosting: NSHostingView<ReviewView>!
     private var escMonitor: Any?
 
+    private let sizing = ReviewWindowSizing()
+    private var mode: ReviewWindowMode = .expanded
+    /// 上次应用的窗口 contentSize（节流阈值 + 单调增高守卫的比较基准）。
+    private var lastSize: CGSize = CGSize(width: 480, height: 200)
+    /// 折叠前记录的展开 frame，用于展开时恢复锚点。
+    private var savedExpandedFrame: NSRect?
+    private var pendingResize: DispatchWorkItem?
+
+    /// Coordinator 注入：关闭按钮/标题栏关闭 → 汇聚到唯一 cancel 路径（会回调本控制器 close()）。
+    var onRequestClose: (() -> Void)?
+
     init(state: ReviewState) {
-        panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 460),
-            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
+        self.state = state
+        expandedPanel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 200),
+            styleMask: ReviewWindowStyle.expanded,   // 已去 .resizable：尺寸全自动
+            backing: .buffered, defer: false
         )
-        panel.title = "LangFix"
-        panel.titlebarAppearsTransparent = true
-        panel.isFloatingPanel = true
-        panel.level = .floating
-        panel.hidesOnDeactivate = false
-        panel.isReleasedWhenClosed = false
-        panel.contentView = NSHostingView(rootView: ReviewView(state: state))
+        capsulePanel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 132, height: 44),
+            styleMask: ReviewWindowStyle.capsule,
+            backing: .buffered, defer: false
+        )
+        super.init()
+        configurePanels()
+    }
+
+    private func configurePanels() {
+        // 展开 panel。
+        expandedPanel.title = "LangFix"
+        expandedPanel.titlebarAppearsTransparent = true
+        let hosting = NSHostingView(rootView: makeReviewView(maxContentSize: defaultMaxContentSize))
+        expandedHosting = hosting
+        expandedPanel.contentView = hosting
+
+        // 折叠胶囊 panel：透明、承载 SwiftUI 胶囊。
+        let capsuleHosting = NSHostingView(rootView: CollapsedReviewEntry(state: state) { [weak self] in
+            self?.handle(.tapCapsule)
+        })
+        capsuleHosting.layer?.backgroundColor = .clear
+        capsulePanel.contentView = capsuleHosting
+        capsulePanel.backgroundColor = .clear
+        capsulePanel.isOpaque = false
+        capsulePanel.hasShadow = false
+
+        // 两 panel level / collectionBehavior / 释放策略保持一致（防跳层 / 丢 Space，design.md §2.2）。
+        for p in [expandedPanel, capsulePanel] {
+            p.isFloatingPanel = true
+            p.level = .floating
+            p.hidesOnDeactivate = false
+            p.isReleasedWhenClosed = false
+            p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            p.delegate = self
+        }
+    }
+
+    /// 构造注入了主题上限与自然尺寸回调的 ReviewView。
+    private func makeReviewView(maxContentSize: CGSize) -> ReviewView {
+        ReviewView(state: state, maxContentSize: maxContentSize) { [weak self] natural in
+            self?.updateNaturalSize(natural)
+        }
+    }
+
+    /// 上屏前的兜底上限（真实上限在上屏后按 panel.screen 重算）。
+    private var defaultMaxContentSize: CGSize {
+        let vf = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        return sizing.limits(visibleFrame: vf)
     }
 
     func showCentered() {
-        panel.center()
+        expandedPanel.center()
         NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
-        // Esc 关闭
+        expandedPanel.makeKeyAndOrderFront(nil)
+        // 上屏后按真实所在屏刷新内容上限。
+        expandedHosting.rootView = makeReviewView(maxContentSize: currentMaxContentSize())
+        // Esc：经 .cancelAction 移除后由此 monitor 归一为「折叠」（design.md §2.3）。
         escMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53 { // Esc
-                self?.close()
+            guard let self else { return event }
+            if event.keyCode == 53 {   // Esc
+                self.handle(.esc)
                 return nil
             }
             return event
         }
     }
 
+    private func currentMaxContentSize() -> CGSize {
+        let vf = (expandedPanel.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        return sizing.limits(visibleFrame: vf)
+    }
+
+    // MARK: - 尺寸自适应（节流 + clamp + 单调增高 + 顶边锚定，design.md §2.1c）
+
+    private func updateNaturalSize(_ natural: CGSize) {
+        guard mode == .expanded else { return }   // 折叠态不 resize 展开 panel
+        pendingResize?.cancel()
+        let item = DispatchWorkItem { [weak self] in self?.applyResize(natural) }
+        pendingResize = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(60), execute: item)
+    }
+
+    private func applyResize(_ natural: CGSize) {
+        guard mode == .expanded else { return }
+        let vf = (expandedPanel.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        let isStreaming: Bool
+        switch state.phase {
+        case .loading, .streaming: isStreaming = true
+        default: isStreaming = false
+        }
+        let target = sizing.monotonicTarget(natural: natural, visibleFrame: vf,
+                                            lastHeight: lastSize.height, isStreaming: isStreaming)
+        // 阈值：宽 ≥8pt、高 ≥6pt 才 resize（防流式逐帧抖动）。
+        guard abs(target.width - lastSize.width) >= 8 || abs(target.height - lastSize.height) >= 6 else { return }
+        lastSize = target
+        var frame = expandedPanel.frame
+        let top = frame.maxY
+        frame.size = expandedPanel.frameRect(forContentRect: NSRect(origin: .zero, size: target)).size
+        frame.origin.y = top - frame.height   // 顶边锚定，向下增高
+        keepFrameInVisibleScreen(&frame, visibleFrame: vf)
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.16
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            expandedPanel.animator().setFrame(frame, display: true)
+        }
+    }
+
+    /// 把越界 frame 平移回 visibleFrame 内（不缩放，仅平移）。
+    private func keepFrameInVisibleScreen(_ frame: inout NSRect, visibleFrame vf: NSRect) {
+        guard vf != .zero else { return }
+        if frame.maxX > vf.maxX { frame.origin.x = vf.maxX - frame.width }
+        if frame.minX < vf.minX { frame.origin.x = vf.minX }
+        if frame.maxY > vf.maxY { frame.origin.y = vf.maxY - frame.height }
+        if frame.minY < vf.minY { frame.origin.y = vf.minY }
+    }
+
+    // MARK: - 三态迁移（纯状态机驱动）
+
+    private func handle(_ event: ReviewWindowEvent) {
+        let t = mode.reduce(event)
+        if t.cancelTask {                 // 关闭路径：委托 Coordinator 唯一 cancel 出口
+            mode = .closed
+            onRequestClose?()
+            return
+        }
+        guard t.mode != mode else { return }
+        let from = mode
+        mode = t.mode
+        switch t.mode {
+        case .collapsed: applyCollapse(from: from)
+        case .expanded:  applyExpand(from: from)
+        case .closed:    break
+        }
+    }
+
+    private func applyCollapse(from: ReviewWindowMode) {
+        savedExpandedFrame = expandedPanel.frame
+        // 胶囊定位：与展开 panel 顶边对齐、水平居中，再 clamp 到 visibleFrame。
+        let ef = expandedPanel.frame
+        var cf = capsulePanel.frame
+        cf.origin.x = ef.midX - cf.width / 2
+        cf.origin.y = ef.maxY - cf.height
+        let vf = (expandedPanel.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        keepFrameInVisibleScreen(&cf, visibleFrame: vf)
+        capsulePanel.setFrame(cf, display: true)
+        expandedPanel.orderOut(nil)
+        capsulePanel.orderFront(nil)
+    }
+
+    private func applyExpand(from: ReviewWindowMode) {
+        capsulePanel.orderOut(nil)
+        if var f = savedExpandedFrame {
+            let vf = (expandedPanel.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+            keepFrameInVisibleScreen(&f, visibleFrame: vf)
+            expandedPanel.setFrame(f, display: true)
+        }
+        if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
+        expandedPanel.makeKeyAndOrderFront(nil)
+    }
+
+    // MARK: - NSWindowDelegate
+
+    /// 失焦 → 折叠（延迟 120ms 过滤焦点抖动，design.md §2.3）。
+    func windowDidResignKey(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === expandedPanel else { return }
+        guard mode == .expanded else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(120)) { [weak self] in
+            guard let self, self.mode == .expanded, !self.expandedPanel.isKeyWindow else { return }
+            self.handle(.resignKey)
+        }
+    }
+
+    /// 标题栏关闭按钮：汇聚到唯一 cancel 路径，返回 false 阻止 AppKit 自行 close（我们已在 handle 里销毁）。
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        handle(.closeRequested)
+        return false
+    }
+
+    // MARK: - 销毁
+
+    /// 真正的销毁：移除 monitor、两 panel orderOut+close、清 delegate。幂等。
     func close() {
         if let m = escMonitor { NSEvent.removeMonitor(m); escMonitor = nil }
-        panel.orderOut(nil)
-        panel.close()
+        pendingResize?.cancel()
+        pendingResize = nil
+        mode = .closed
+        for p in [expandedPanel, capsulePanel] {
+            p.delegate = nil
+            p.orderOut(nil)
+            p.close()
+        }
     }
 }
 
