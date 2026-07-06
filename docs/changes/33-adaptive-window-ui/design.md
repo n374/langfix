@@ -3,11 +3,13 @@
 
 - **Owner**: by 技术方案官 on behalf of wu.nerd
 - **Reviewers**: 编排官、wu.nerd
-- **创建日期**: 2026-07-03
-- **基于 proposal**: [proposal.md](./proposal.md)
+- **创建日期**: 2026-07-03（Round 2 增补：2026-07-06）
+- **状态**: Round 1 已落地（PR #2 OPEN）；**Round 2 设计定稿**（本次，bug 修复 + 三模式交互改写，Codex 交叉评审 3 轮收敛）
+- **基于 proposal**: [proposal.md](./proposal.md)（Round 2 需求见 §9）
 - **关联 spec**: [specs/review-window/spec.md](./specs/review-window/spec.md)
 - **共享分支**: `feat/33-adaptive-window-ui`
-- **Constitution check**: 已读 [../../overview/constitution.md](../../overview/constitution.md)，**无冲突**（主题偏好属非敏感配置，走 UserDefaults 不进 Keychain，Constraint-1 只约束 API key；本 change 不动流式解析/AI 调用/护栏/diff，不触 Constraint-2/3/4）。
+- **Constitution check**: 已读 [../../overview/constitution.md](../../overview/constitution.md)，**无冲突**（窗口行为模式与主题一样属非敏感偏好，走 UserDefaults 不进 Keychain，Constraint-1 只约束 API key；本 change（含 Round 2）不动流式解析/AI 调用/护栏/diff，不触 Constraint-2/3/4）。
+- **Round 2 章节**: 见 [§12 Round 2](#12-round-2bug-修复--三模式交互改写含-codex-ui-定稿)（本次新增，Round 1 内容 §1–§11 保留为历史基线）。
 
 ## 1. 概述
 
@@ -416,3 +418,312 @@ Picker("弹窗主题", selection: $settings.reviewThemeRaw) {
 - [ ] 无需离线数据验证 / 对账
 - [ ] 无新埋点 / 监控（隐私红线：折叠三态不记录内容，仅本地状态）
 - [ ] 开发官落地建议顺序：① 关闭语义统一 + Esc/keyboardShortcut 修正（正确性优先）→ ② sizing policy + ReviewView 自然尺寸测量 → ③ 双 panel 折叠 → ④ 主题系统 + 设置页 → ⑤ 补 sizing/主题/状态机单测 + 手工 UI 验收（短文本/长文本/streaming 折叠后继续/Esc/关闭取消）
+
+---
+
+## 12. Round 2（bug 修复 + 三模式交互改写，含 Codex UI 定稿）
+
+> **需求来源**：proposal [§9](./proposal.md)（用户拍板 `fc90708a` 逐条落定）+ spec `review-window` Round 2 差分。**Round 1（§1–§11）为历史基线，未推翻**；本节只描述 Round 2 的增量设计。
+> **协作**：Codex 主导 UI/视觉设计（用户点名「让 Codex 设计 UI」），本方（Claude）做内部落地设计；两线并行后**对抗式交叉评审 3 轮收敛**（摘要见 §12.14）。
+> **落地基线是当前已合入代码**（不是 §1–§11 的计划稿）：Round 1 已把 `ReviewWindowSizing` / `ReviewWindowMode` / `ReviewWindowStyle` / `ReviewTheme` / 双 panel `ReviewWindowController` / `CollapsedReviewEntry` / 主题 Picker 全部落地（commit `4672394`…`61139ff`）。本节所有改动均相对**已落地代码**。
+
+### 12.0 Round 2 要解决的四件事（与已落地代码的差距）
+
+| # | 需求 | 已落地代码现状 | Round 2 差距 |
+|---|---|---|---|
+| Bug1 | ≤maxH 绝不出现纵向滚动条、实时增高 | `ReviewView` 恒定 `ScrollView` 包裹（`ReviewView.swift:24`）；controller 60ms debounce + 高 6pt 阈值 + `animator()`（`AppCoordinator.swift` `updateNaturalSize`/`applyResize`） | 恒定 ScrollView + resize 滞后 → 流式增高期出现滚动条。需结构性消除 |
+| Bug2 | 展开按当刻内容重算尺寸 | `applyExpand` 恢复 `savedExpandedFrame`（折叠当刻冻结的尺寸） | 直接复用旧尺寸 = Bug2。需展开时重测重算 |
+| 三模式 | A/B/C（默认 C）+ 单一状态机 | `ReviewWindowMode.reduce` 无 behavior、失焦在所有场景都折叠；两 panel 恒 `.floating` | 需引入 behavior 轴、失焦仅 A 折叠、层级随模式、单一状态机 |
+| 隐藏图标 | A/B/C 三模式都提供、点击折叠 | 无此事件、无此控件 | 需新增 `.hideIcon` 事件 + 标题栏控件 + 设置持久化 |
+
+### 12.1 Bug1：逐帧无滚动条（结构保证，非时序保证）
+
+**根因**：`ReviewView` 恒定用 `ScrollView` 包裹内容；controller 的 resize 走 60ms debounce + 6pt 阈值 + 动画。流式逐帧增高时，内容自然高**领先于**滞后的窗口高度 → `ScrollView` 内容高于其 viewport → 渲染纵向滚动条（正是「先出滚动条再撑开」的中间帧）。
+
+**定稿方案 = 结构性消除 + 测量/显示解耦 + runloop 合并**（Codex P0.1/P0.2/P1.6 采纳）：
+
+#### (a) 结构门控——未封顶时视图树里根本不存在可显示的 vertical scroller
+- 用**测量得到的自然高**决定：`isOverflowing = latestNaturalSize.height > maxH + ε`（`ε` 仅覆盖浮点误差，**不覆盖真实高度**）。
+- `isOverflowing == false`：`ReviewView` **直接渲染 `phaseContent`，不包滚动容器** → 结构上不可能出现纵向滚动条，**与窗口 frame 是否在同一绘制帧修正无关**（这是「逐帧无滚动条」的正确性根据）。窗口 frame 滞后的最坏情况只是内容底部被裁 ≤1 帧（不可见），绝不出现滚动条。
+- `isOverflowing == true`：内容 wrap 进 `ScrollView`，其 frame 高固定为 `maxH`，超出部分内部滚动（spec 允许）。
+
+```swift
+// ReviewView：显示树按 controller 注入的 isOverflowing 决定是否包滚动容器（不自测几何，避免反馈环）
+struct ReviewView: View {
+    @ObservedObject var state: ReviewState
+    let theme: ReviewTheme
+    let maxContentSize: CGSize
+    let isOverflowing: Bool           // ← controller 依据 latestNaturalSize 计算后注入
+    var body: some View {
+        Group {
+            if isOverflowing {
+                ScrollView { phaseContent.frame(maxWidth: maxContentSize.width, alignment: .leading) }
+                    .frame(maxWidth: maxContentSize.width, maxHeight: maxContentSize.height)
+            } else {
+                phaseContent
+                    .frame(maxWidth: maxContentSize.width, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)   // 未封顶：内容按自然高，绝不出现滚动条
+            }
+        }
+        .background(theme.windowBackground)
+    }
+}
+```
+
+#### (b) 测量树与显示树分离（消除 overflow 边界反跳，Codex P0.2）
+`naturalH` 逼近 `maxH` 时，若 wrap/unwrap `ScrollView` 会改变可用宽度/inset（尤其系统「始终显示滚动条」辅助功能设置下滚动条占布局宽）→ 文本重排 → `naturalH` 反跳、在边界反复横跳。故：
+- **自然尺寸只由一份专用测量宿主产出**（见 §12.3 measurement host），它**恒定无滚动容器、固定内容宽**，测量口径**不随显示树 wrap/unwrap 变化**；
+- 显示树的 `isOverflowing` 仅读该测量宿主的 `latestNaturalSize`，二者解耦 → 无跨边界反馈环。
+
+#### (c) resize 时序——去 debounce/动画，runloop 合并只 apply 最新值（Codex P1.6）
+- **去掉 60ms debounce 与高度 6pt 阈值**（未封顶时降到 subpixel `ε`）：流式增高不得被节流阻挡，否则重现滞后→滚动条。
+- 高频 preference 回调只更新 `latestNaturalSize` 并置 `pendingResize` 标志；**下一个 main runloop tick 只执行一次 `setFrame`**，apply 当刻最新值（避免每 token 都 setFrame 造成 AppKit/SwiftUI 互相追布局）。
+- **流式增高用直接 `setFrame(display: true)`，不加动画**（动画会让窗口永远追内容 = 滚动条）；动画仅保留给**阶段切换**与**折叠/展开**（0.12–0.16s）。
+- 保留 streaming **单调增高守卫**（`monotonicTarget`，配合单调前缀守卫防抖不闪缩）。
+- 顶边锚定 + `keepFrameInVisibleScreen` 不变。
+
+**验收口径（写进 spec，可实现验证）**：`naturalH ≤ maxH` 时（1）显示树层级中**不含可显示的 vertical scroller**；（2）resize 仅 runloop 合并、**无 debounce/动画/6pt 阈值阻挡增长**。二者同时成立才通过；happy-path 出现滚动条即不通过（正确性红线，不因概率降级）。
+
+### 12.2 Bug2：展开按当刻内容重算尺寸
+
+**根因**：`applyExpand` 恢复 `savedExpandedFrame`（折叠当刻的尺寸）。
+
+**定稿方案**：展开时**丢弃 saved 的尺寸、只留锚点**（顶边 `origin.y`）；用 §12.3 measurement host 的 `latestNaturalSize`（保证是折叠期持续刷新后的当刻值）→ `sizing.target(natural:visibleFrame:)` clamp → 按顶边锚点 `setFrame` 为重算尺寸 → 重置 `lastSize` 基线 → `makeKeyAndOrderFront`。展开后再 `layoutSubtreeIfNeeded` 触发一次 preference 校正（belt-and-suspenders）。
+
+```swift
+private func applyExpand(from: ReviewWindowMode) {
+    capsulePanel.orderOut(nil)
+    let vf = (expandedPanel.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+    let target = sizing.target(natural: latestNaturalSize, visibleFrame: vf)   // ← 当刻内容，不用旧 frame
+    var f = expandedPanel.frame
+    let top = savedExpandedFrame?.maxY ?? f.maxY                                // 只借锚点
+    f.size = expandedPanel.frameRect(forContentRect: NSRect(origin: .zero, size: target)).size
+    f.origin.y = top - f.height
+    keepFrameInVisibleScreen(&f, visibleFrame: vf)
+    lastSize = target                                                          // 重置节流基线
+    applyLevel(for: behavior, panel: expandedPanel)                            // 层级随模式（§12.4）
+    expandedPanel.setFrame(f, display: true)
+    if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
+    expandedPanel.makeKeyAndOrderFront(nil)
+    expandedHosting.layoutSubtreeIfNeeded()
+}
+```
+
+**验收**：折叠期喂增量使内容变高/变矮，展开首帧 frame == `recompute(折叠期更新后的当刻内容)` 且 **≠ 折叠前尺寸**。
+
+### 12.3 常驻测量宿主（Bug1 测量源 + Bug2 折叠期持续刷新的共同底座，Codex P0.3 最终采纳）
+
+**问题**：Bug2 依赖「折叠期 `latestNaturalSize` 持续刷新」。但若测量子树在折叠态被条件分支卸载、或 expanded panel ordered-out 后不再 layout，则 `@ObservedObject` 更新**不会凭空产生新 preference**，`latestNaturalSize` 会停在折叠前旧值 → Bug2 重现。
+
+**定稿方案 = 专用、常驻、参与 layout 的独立测量宿主**：
+- 新增一个**专用 measurement `NSHostingView`**，渲染与展开态相同的 `phaseContent`（共享同一 `ReviewState`）+ `NaturalSizeKey`，**固定内容宽、无滚动容器、`alpha=0` 不参与显示、不影响胶囊视觉**。
+- 该宿主**始终挂在当前 on-screen 的 panel 视图树里**：折叠态挂到 **capsule panel**（折叠期 capsule 是 ordered-in、持续 layout），展开态挂到 **expanded panel**；模式切换时随之 re-parent，**任何态都不被条件分支卸载**。
+- 每次 `state` 变更后、以及**展开重算前**，对该宿主显式 `layoutSubtreeIfNeeded()`，从 `NaturalSizeKey`/`fittingSize` 更新 `latestNaturalSize`；**不依赖 ordered-out 窗口自发 layout**。
+- 于是 `latestNaturalSize` 全程有效：Bug1 的 `isOverflowing` 与 Bug2 的展开重算都读它。
+
+> 该宿主是**测量单一真相源**，与显示树彻底解耦（§12.1b），既消除 overflow 边界反跳，又保证折叠期测量不失效。Codex 第 3 轮确认此口径闭环、无残留。
+
+### 12.4 三模式单一状态机（mode × 容器态）
+
+**新增 behavior 轴**（`WindowBehaviorMode`，持久化，见 §12.9）：
+
+```swift
+enum WindowBehaviorMode: String, CaseIterable, Identifiable, Sendable {
+    case focusCollapse   // A 失焦折叠
+    case alwaysOnTop     // B 始终置顶
+    case normal          // C 默认窗口（默认）
+    var id: String { rawValue }
+    static let defaultMode: WindowBehaviorMode = .normal
+}
+```
+
+**单一状态机 = `behavior × presentation` + 显式副作用 actions**（Codex P1.4 采纳：把 behavior 编码进态、reduce 产出 action 列表，便于枚举全矩阵测试，避免漏组合）：
+
+```swift
+struct ReviewWindowMachineState: Equatable, Sendable {
+    var behavior: WindowBehaviorMode          // 开窗时捕获，运行期不变（§12.9 决策）
+    var presentation: ReviewWindowMode        // expanded / collapsed / closed
+}
+enum ReviewWindowAction: Equatable, Sendable {
+    case applyLevel        // 依 behavior 施加窗口层级（两 panel）
+    case recomputeSize     // 展开：按当刻内容重算尺寸（Bug2）
+    case cancelTask        // 关闭：取消底层 Task
+    case orderCapsule      // 折叠：显示胶囊、orderOut 展开
+    case orderExpanded     // 展开：显示展开、orderOut 胶囊
+}
+struct ReviewWindowOutcome: Equatable, Sendable {
+    var presentation: ReviewWindowMode
+    var actions: [ReviewWindowAction]
+}
+
+extension ReviewWindowMachineState {
+    func reduce(_ event: ReviewWindowEvent) -> ReviewWindowOutcome {
+        if presentation == .closed { return .init(presentation: .closed, actions: []) }
+        switch (presentation, event) {
+        case (.expanded, .resignKey):
+            // 失焦仅在 A 折叠；B/C no-op（B 保持置顶、C 可被遮挡但不折叠）
+            return behavior == .focusCollapse
+                ? .init(presentation: .collapsed, actions: [.orderCapsule, .applyLevel])
+                : .init(presentation: .expanded, actions: [])
+        case (.expanded, .esc), (.expanded, .hideIcon):
+            // Esc / 隐藏图标：三模式一律折叠为胶囊（不 cancel）
+            return .init(presentation: .collapsed, actions: [.orderCapsule, .applyLevel])
+        case (.collapsed, .tapCapsule):
+            // 点击胶囊：三模式一律展开 + 按当刻内容重算（Bug2）
+            return .init(presentation: .expanded, actions: [.recomputeSize, .applyLevel, .orderExpanded])
+        case (_, .closeRequested):
+            // 关闭是唯一 cancel 路径（三模式共用）
+            return .init(presentation: .closed, actions: [.cancelTask])
+        default:
+            return .init(presentation: presentation, actions: [])   // 无意义组合 no-op
+        }
+    }
+}
+```
+
+新增事件：`ReviewWindowEvent.hideIcon`。`.resignKey` 语义从「无条件折叠」下沉为「**仅 A 折叠**」。
+
+**controller 侧**：`windowDidResignKey` 只在 `behavior == .focusCollapse` 时安排 120ms 去抖后的 `.resignKey`（B/C 不监听/直接忽略）；`applyLevel` / `recomputeSize` / `cancelTask` 等按 action 派发。关闭仍委托 Coordinator 唯一 `closeReviewAndCancel`（Round 1 语义不变）。
+
+### 12.5 窗口层级随模式（两 panel、两态统一施加，Codex P1.5）
+
+层级是 `behavior` 的函数，**对 expanded panel 与 capsule panel 都施加，且在展开/折叠切换时各自 re-apply**：
+
+```swift
+private func applyLevel(for behavior: WindowBehaviorMode, panel: NSPanel) {
+    switch behavior {
+    case .alwaysOnTop:                       // B：展开态与胶囊态都置顶
+        panel.isFloatingPanel = true
+        panel.level = .floating
+    case .focusCollapse, .normal:            // A / C：普通层级，可被其他窗口遮挡
+        panel.isFloatingPanel = false
+        panel.level = .normal
+    }
+}
+```
+
+- Round 1 两 panel 恒 `.floating` 的写法（`configurePanels`）改为按 behavior 施加；`hidesOnDeactivate=false`、`collectionBehavior`、`isReleasedWhenClosed=false` 三模式共用不变。
+- **A 模式改 `.normal` 后失焦折叠仍可靠**：折叠由 `windowDidResignKey` → 状态机驱动，**与窗口 level 无关**（`.normal` 窗口同样收到 `resignKey`）；120ms 去抖 + `!isKeyWindow` 复检过滤输入法/临时子面板的焦点抖动，Round 1 已验证的过滤逻辑保留。
+- **B 胶囊置顶、A/C 胶囊普通层级**：`applyCollapse` 里对 capsule panel 也调 `applyLevel(for: behavior, panel: capsulePanel)`。
+
+### 12.6 隐藏图标（A/B/C 三模式都提供，Codex UI 定稿：标题栏 accessory）
+
+- **载体**：`NSTitlebarAccessoryViewController`，`layoutAttribute = .right`，内部 `NSHostingView` 承载 SwiftUI 小按钮。**放标题栏、不进 `phaseContent` 测量树**——避免污染 §12.3 的自然尺寸测量（Codex 明确反对 `.overlay` 进内容树赌布局边界）。
+- **视觉**：SF Symbol `minus.circle`（**不用 `xmark` 系列**，避免与关闭语义混淆）；按钮 24×24pt、命中区 28×28pt；tooltip「隐藏为胶囊」；hover 背景 `theme.cardFill.opacity(0.75)` + 描边 `theme.cardStroke`，`.easeOut(0.12)`；颜色中性/主题 accent，**不用红色**（红色留给关闭）。各主题微调见 §12.8 末。
+- **行为**：点击 → `handle(.hideIcon)` → 三模式折叠为胶囊、**不 cancel**。与关闭区分：关闭仍走系统标题栏关闭按钮 / 内容区「关闭·取消」按钮（→ `closeRequested`）。
+
+### 12.7 设置界面三模式选择器（Codex UI 定稿：单选卡片）
+
+- **控件形态 = 三张单选卡片**（不用分段控件）。理由（Codex）：A/B/C 差异非三个短词能讲清，尤其 **B「始终置顶但 Esc/隐藏仍可折叠为胶囊」必须写明**，否则用户误以为置顶不可收起——分段控件把语义藏进 tooltip，验收心智风险高。
+- 卡片规格：`VStack` + 3 个自定义 `Button` 卡片，绑定 `settings.windowBehaviorModeRaw`；每项高 56–64pt、圆角 8；选中态 `theme.accent` 1.5pt 描边 + `checkmark.circle.fill`。默认选中 **C**。
+
+| 模式 | 图标 | 主文案 | 副文案 |
+|---|---|---|---|
+| A | `eye.slash` | 失焦折叠 | 切到别处自动变胶囊；Esc / 隐藏也会折叠 |
+| B | `pin.fill` | 始终置顶 | 窗口和胶囊都保持置顶；Esc / 隐藏可暂收 |
+| C（默认） | `macwindow` | 默认窗口 | 像普通窗口一样可被遮挡；Esc / 隐藏可收起 |
+
+- 落点：`SettingsView.generalSection`，紧邻现有「弹窗主题」Picker。
+
+### 12.8 折叠胶囊三态视觉增强（Codex 定稿）
+
+Round 1 基础版（`sparkles` / `checkmark.seal.fill` / `exclamationmark.triangle.fill` + 语义色 token）方向正确、保留。Round 2 增强：
+
+- 胶囊尺寸 `132×44` → **`148×44`**（B 模式加置顶暗示后不挤）。
+- 三态动效：进行中 `sparkles`+`accent`，pulse 1.15s `easeInOut`（scale 1.0→1.06 / opacity 0.75→1.0）；已完成 `checkmark.seal.fill`+`success`，进入时一次 0.16s settle、不持续动；出错 `exclamationmark.triangle.fill`+`error`，进入 2 次短闪（单次 0.12s，总 ≤0.3s）。
+- **B 模式置顶暗示**：胶囊右上角 10pt `pin.fill` 小徽标、`opacity 0.72`，不改胶囊主体布局；A/C 不显示。**不用更强光效**表示置顶（会与「出错/完成」状态色抢语义）。
+- 隐藏图标各主题：Aurora Glass `accent` 70%、冷玻璃 hover；Neon Noir 描边稍亮（防紫黑里看不见）；Solar Ink 金色 accent、hover 阴影降 0.12；Arctic Circuit 默认 `.secondary`、hover 才上 accent。
+
+### 12.9 持久化 + 模式切换即时性决策
+
+- **持久化**：`SettingsStore` 新增 `@Published var windowBehaviorModeRaw`（UserDefaults key `windowBehaviorMode`，`register` 默认 `normal`=C），只存 rawValue，非法值 fallback 默认；**不进 `AppConfig`**（与 AI 引擎无关），与主题偏好同规格（非敏感 → 不碰 constitution 红线）。
+- **模式切换即时性决策（本阶段拍板项）= 下次开窗生效**：`behavior` 在窗口 **`present()` 时捕获**并写入 `ReviewWindowMachineState.behavior`，运行期不变；改设置**不回溯改已打开窗口**的层级/焦点行为，下次开窗读新值。
+  - **理由**：纠错弹窗生命周期极短（一次划词一个窗），中途改 level（普通↔floating）叠加折叠/展开会引入层级/焦点抖动（proposal §9.6 风险）；捕获式最简单、可测、无抖动。与需求官建议一致。
+  - 代码/测试注释写明此捕获时机，避免「设置窗开着已有弹窗时用户以为即时生效」的误解（Codex P2.7）。
+
+### 12.10 Round 2 关键决策
+
+| 决策点 | 选择 | 备选 | 理由 | 关联 |
+|---|---|---|---|---|
+| R1 Bug1 消除方式 | 结构门控（未封顶不包滚动容器）+ 测量/显示解耦 | 仅调小 debounce / 隐藏 scroller | 结构上不存在 scroller → 与帧时序无关的正确性保证；纯调时序仍有中间帧风险 | §12.1 |
+| R2 测量源 | 常驻独立 measurement host（固定宽、无滚动、alpha0） | 复用显示树的 PreferenceKey | 折叠期显示树可能不 layout → 测量失效（Bug2）；且显示树 wrap/unwrap 致边界反跳 | §12.3 / Codex P0.2/P0.3 |
+| R3 resize 时序 | 去 debounce/动画，pending-flag runloop 合并只 apply 最新 | 保留 60ms debounce | debounce 制造滞后 = 滚动条；runloop 合并既跟手又不过度 setFrame | §12.1c / Codex P1.6 |
+| R4 状态机形态 | `behavior×presentation` + 显式 action 列表 | behavior 仅作 reduce 入参 | 编码进态 + action 化便于枚举 3×事件全矩阵、不漏副作用组合 | §12.4 / Codex P1.4 |
+| R5 层级施加 | level=f(behavior)，两 panel 两态都施加并 re-apply | 仅改 expanded level | 胶囊层级也须随模式（B 胶囊置顶）；漏一处即层级分叉 | §12.5 / Codex P1.5 |
+| R6 模式切换即时性 | 下次开窗生效（present 时捕获） | 即时作用于已开窗口 | 弹窗短命 + 避免中途改 level 抖动；最简可测 | §12.9 |
+| R7 隐藏图标载体 | 标题栏 `NSTitlebarAccessoryViewController` | 内容区 `.overlay(.topTrailing)` | 不污染自然尺寸测量树（Bug1 测量口径） | §12.6 / Codex UI |
+| R8 三模式选择器 | 单选卡片 | 分段控件 | B 模式语义须显式写明，分段控件藏语义、验收心智风险高 | §12.7 / Codex UI |
+
+### 12.11 Round 2 影响面（相对已落地代码）
+
+| 文件 | Round 2 改动 | 兼容性 |
+|---|---|---|
+| `ReviewWindowMode.swift` | 新增 `WindowBehaviorMode`；`ReviewWindowMachineState`（behavior×presentation）；`ReviewWindowAction` / `ReviewWindowOutcome`；`reduce` 改产出 action 列表；新增事件 `.hideIcon`；`.resignKey` 语义下沉为仅 A | 纯逻辑，随控制器改；旧 `reduce` 测试需迁移到新签名 |
+| `AppCoordinator.swift`（`ReviewWindowController`） | 常驻 measurement host + re-parent；`isOverflowing` 计算并注入 ReviewView；去 debounce → pending-flag runloop 合并 setFrame；`applyExpand` 改重算（Bug2）；`applyLevel(for:panel:)` 两 panel 两态施加；`windowDidResignKey` 仅 A；标题栏隐藏图标 accessory；`present` 时捕获 behavior | 内部实现；入口不变 |
+| `ReviewView.swift` | 去掉恒定 `ScrollView`，改 `isOverflowing ? ScrollView : 直渲`；自然尺寸测量移交 measurement host（显示树不自测几何） | 视图私有 |
+| `SettingsStore.swift` | 新增 `windowBehaviorModeRaw` + `register` 默认 `normal` + 便捷 `windowBehaviorMode` 计算属性 | 新增字段，旧用户读默认 C |
+| `SettingsView.swift` | `generalSection` 加三模式单选卡片 | 兼容 |
+| 新增（可选拆分） | `WindowBehaviorMode`、隐藏图标 SwiftUI 小视图、三模式卡片视图 | 新增 |
+
+### 12.12 Round 2 测试策略（把 spec Round 2 TBD 具体化，交开发测试阶段落地）
+
+> spec `review-window` 里 Round 2 新增/改写 Scenario 现挂 `TBD(...)`，下表给出可落地的单测口径；开发测试阶段替换 spec 里的 TBD 为真实测试路径。SwiftUI View body / NSPanel 机械层由手工 UI 验收兜底。
+
+| spec Scenario（Round 2） | 测试落点 | 断言 |
+|---|---|---|
+| 未达 maxH 无滚动条（Bug1） | `ReviewWindowSizingTests` + controller `isOverflowing` seam | 逐帧喂 `naturalH ≤ maxH`：`isOverflowing==false`（显示树不含滚动容器）；窗口 contentH == naturalH；无 vertical scroller |
+| 超 maxH 才滚动 | `ReviewWindowSizingTests` | `naturalH > maxH+ε` → `isOverflowing==true`、contentH 封顶 maxH |
+| 展开按当刻内容重算（Bug2） | 控制器 recompute seam（注入 `latestNaturalSize`） | 折叠前 S0；折叠期改 `latestNaturalSize`（增/减）；展开断言 frame==`sizing.target(当刻,vf)` 且 `!= S0` |
+| 折叠期测量不失效 | measurement host 更新路径 | 折叠态喂 state 变更 → `latestNaturalSize` 随之更新（不停在旧值） |
+| 全新安装默认 C | `WindowModeStoreTests`（独立 UserDefaults suite） | 未写偏好 → `windowBehaviorMode == .normal` |
+| 模式持久化 | `WindowModeStoreTests` | set `.alwaysOnTop` → 读回 B；跨新实例仍 B；非法 rawValue fallback C |
+| 失焦行为随模式差分 | `ReviewWindowModeTests`（3×事件矩阵） | A+resignKey→collapsed；B/C+resignKey→expanded（no-op） |
+| Esc / 隐藏图标三模式一律折叠 | `ReviewWindowModeTests` | A/B/C + esc / hideIcon → collapsed 且 outcome 无 `.cancelTask` |
+| 点击胶囊三模式展开+重算 | `ReviewWindowModeTests` | A/B/C：collapsed+tapCapsule → expanded 且 actions 含 `.recomputeSize` |
+| 层级随模式差分 | `ReviewWindowLevelTests`（对 `applyLevel` 结果断言，或注入 fake panel） | B→`.floating`+`isFloatingPanel`；A/C→`.normal`；胶囊同 behavior |
+| 关闭唯一 cancel（三模式） | 沿用 `CloseSemanticsTests` | closeRequested→outcome 含 `.cancelTask`；esc/resignKey/hideIcon 均无 |
+| 模式切换下次开窗生效 | 控制器 present seam | 改设置后已开窗口 behavior 不变；下次 present 读新值 |
+
+### 12.13 Constitution check（Round 2）
+
+- [x] 已读 [constitution.md](../../overview/constitution.md) 4 条红线，**Round 2 无冲突**。
+- [x] 窗口行为模式 = **非敏感偏好** → UserDefaults（Constraint-1 仅约束 API key，不进 Keychain）。
+- [x] 不新增日志/落盘原文修正文（Constraint-2）；不动最小改动护栏/diff/流式解析/AI 调用（Constraint-3）；不改用户原选区（Constraint-4）。
+- [x] 无红线强制覆盖。
+
+### 12.14 Codex 交叉评审摘要（Round 2）
+
+- **协作方式**：用户点名「让 Codex 设计 UI」——Codex **主导 UI/视觉设计**（设置三模式选择器 / 隐藏图标 / 胶囊三态），Claude 做内部落地设计；两线并行后**对抗式交叉评审 3 轮收敛**。
+- **Codex 主导并采纳的 UI 定稿**：① 设置三模式 = **单选卡片**（非分段控件，因 B 语义须显式写明）；② 隐藏图标 = **标题栏 accessory + `minus.circle`**（不进内容测量树、不用 xmark/红色）；③ 胶囊三态保留并增强（148×44、三态动效时长、**B 模式 `pin.fill` 置顶暗示**）。四套主题体系（Aurora Glass 默认）Round 1 已定、本轮不推翻。
+- **Codex 对抗评审我方内部方案的关键意见（全部采纳，逐条闭环）**：
+  - **P0.1**：Bug1 不能只靠时序，要**结构保证**（未封顶不包滚动容器）→ §12.1a。
+  - **P0.2**：overflow 边界 wrap/unwrap 致 `naturalH` 反跳 → **测量树与显示树分离** → §12.1b/§12.3。
+  - **P0.3**（第 2 轮提出、第 3 轮确认闭环）：折叠期测量链路有隐含前提，orderOut 后可能不 layout → **专用常驻测量宿主、任何态不卸载、显式 layoutSubtreeIfNeeded** → §12.3。
+  - **P1.4**：状态机把 behavior 编码进态、reduce 产出 action 列表、枚举 3×事件全矩阵 → §12.4。
+  - **P1.5**：层级须两 panel 两态统一施加并 re-apply → §12.5。
+  - **P1.6**：去 debounce 但需 pending-flag runloop 合并、避免每 token setFrame → §12.1c。
+  - **P2.7/P2.8**：模式切换「下次开窗生效」需注释/测试写清；隐藏图标须进状态机+持久化+测试 → §12.9/§12.6/§12.12。
+- **分歧与收敛**：无高级别不可约分歧；三轮均为**正确性/可行性沿本方向的收紧**（非路线之争），本方逐条采纳。**Codex 第 3 轮结论：通过，残留问题无。**
+- **评审轮数**：**3 轮收敛**（第 1 轮 Codex 提 P0/P1/P2 → 采纳；第 2 轮确认，剩 P0.3 折叠期测量 → 补常驻测量宿主；第 3 轮确认 P0.3 闭环、通过）。无需回退。
+
+### 12.15 待用户拍板的视觉项（视觉审美用户保留权）
+
+主题体系（4 套、默认 Aurora Glass）Round 1 已定、本轮不变；Round 2 新增 3 处视觉决策已按 **Codex 推荐默认**写入本设计，**开发可基于此推进**。以下 3 项属用户保留的审美取舍，若要改，一句话即可（改动都很小）：
+
+| # | 视觉项 | Codex 推荐（现默认） | 备选 |
+|---|---|---|---|
+| V1 | 设置三模式选择器 | 三张单选卡片（带副文案解释） | 分段控件（省空间但藏语义） |
+| V2 | 隐藏图标 | 标题栏右侧 `minus.circle` | 其它 SF Symbol / 位置 |
+| V3 | B 模式置顶暗示 | 胶囊右上 10pt `pin.fill` 小徽标 | 不加暗示 / 换表现 |
+
+### 12.16 Round 2 后续动作建议（开发测试阶段）
+
+- 建议落地顺序：① `WindowBehaviorMode` + 状态机改 action 化 + `.hideIcon`（纯逻辑、先补 3×事件矩阵单测）→ ② 常驻 measurement host + `isOverflowing` 注入 + 去 debounce（Bug1，正确性优先）→ ③ `applyExpand` 重算（Bug2）→ ④ `applyLevel` 两 panel 两态 + `windowDidResignKey` 仅 A → ⑤ 设置三模式卡片 + `windowBehaviorModeRaw` 持久化 + 标题栏隐藏图标 → ⑥ 把 spec Round 2 的 `TBD(...)` 替换为真实测试路径（§12.12）+ 手工 UI 验收。
+- **dev↔test 内循环边界**：开发官落地②③ 时必须**主动做 Bug1/Bug2 的失败/边界验收**（不是只跑 happy-path）——Bug1 逐帧断言「≤maxH 无 scroller」、Bug2 断言「展开尺寸 == 当刻重算 ≠ 折叠前」；测试阶段独立复核这两条正确性红线（不因触发概率降级）。
+- 无离线数据/对账；无新埋点/监控（折叠三态不记录内容，仅本地状态）。
+
+### 12.17 Round 2 变更历史
+
+| 轮次 | 日期 | 变更 |
+|---|---|---|
+| Round 2 设计 | 2026-07-06 | Bug1 结构门控 + 测量/显示解耦 + runloop 合并；Bug2 常驻测量宿主 + 展开重算；三模式单一状态机（behavior×presentation+action）；层级随模式两 panel 两态；隐藏图标标题栏 accessory；设置三模式单选卡片；胶囊三态增强 + B 置顶暗示；模式切换下次开窗生效。Codex 主导 UI + 交叉评审 3 轮收敛。 |
