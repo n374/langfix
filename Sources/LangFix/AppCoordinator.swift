@@ -115,7 +115,8 @@ final class AppCoordinator {
     // MARK: - 窗口
 
     private func present(state: ReviewState) {
-        let c = ReviewWindowController(state: state)
+        // behavior 在开窗时捕获；设置变更对已打开窗口下次生效，避免运行期改 level 抖动。
+        let c = ReviewWindowController(state: state, behavior: SettingsStore.shared.windowBehaviorMode)
         // 关闭按钮 / 标题栏关闭 → 汇聚到同一 cancel 路径。
         c.onRequestClose = { [weak self] in self?.closeReviewAndCancel() }
         reviewController = c
@@ -166,37 +167,48 @@ final class AppCoordinator {
 
 // MARK: - 浮窗控制器（双 NSPanel + SwiftUI，三态窗体）
 
+private final class PassthroughHostingView<Content: View>: NSHostingView<Content> {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 /// 弹窗外壳控制器：展开 panel + 折叠胶囊 panel 共享同一 `ReviewState`（design.md §2.2 决策 D1）。
 /// - 窗口态由纯状态机 `ReviewWindowMode.reduce` 驱动（失焦/Esc→折叠、点击胶囊→展开、关闭→销毁+cancel）。
 /// - 尺寸由 `ReviewView` 上报的内容自然尺寸经 `ReviewWindowSizing` clamp + 节流 + 单调增高驱动。
 @MainActor
 final class ReviewWindowController: NSObject, NSWindowDelegate {
     private let state: ReviewState
+    private let behavior: WindowBehaviorMode
     private let expandedPanel: NSPanel
     private let capsulePanel: NSPanel
     private var expandedHosting: NSHostingView<ReviewView>!
+    private var measurementHosting: PassthroughHostingView<ReviewMeasurementView>!
+    private let expandedContainer = NSView()
+    private let capsuleContainer = NSView()
     private var escMonitor: Any?
 
     private let sizing = ReviewWindowSizing()
-    private var mode: ReviewWindowMode = .expanded
+    private var machineState: ReviewWindowMachineState
     /// 上次应用的窗口 contentSize（节流阈值 + 单调增高守卫的比较基准）。
     private var lastSize: CGSize = CGSize(width: 480, height: 200)
-    /// 折叠前记录的展开 frame，用于展开时恢复锚点。
-    private var savedExpandedFrame: NSRect?
-    private var pendingResize: DispatchWorkItem?
+    private var latestNaturalSize: CGSize = CGSize(width: 480, height: 200)
+    private var latestIsOverflowing = false
+    private var resizeApplyScheduled = false
+    private var measurementConstraints: [NSLayoutConstraint] = []
 
     /// Coordinator 注入：关闭按钮/标题栏关闭 → 汇聚到唯一 cancel 路径（会回调本控制器 close()）。
     var onRequestClose: (() -> Void)?
 
-    init(state: ReviewState) {
+    init(state: ReviewState, behavior: WindowBehaviorMode = .normal) {
         self.state = state
+        self.behavior = behavior
+        self.machineState = ReviewWindowMachineState(behavior: behavior, presentation: .expanded)
         expandedPanel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 480, height: 200),
             styleMask: ReviewWindowStyle.expanded,   // 已去 .resizable：尺寸全自动
             backing: .buffered, defer: false
         )
         capsulePanel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 132, height: 44),
+            contentRect: NSRect(x: 0, y: 0, width: 148, height: 44),
             styleMask: ReviewWindowStyle.capsule,
             backing: .buffered, defer: false
         )
@@ -210,22 +222,27 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         expandedPanel.titlebarAppearsTransparent = true
         let hosting = NSHostingView(rootView: makeReviewView(maxContentSize: defaultMaxContentSize))
         expandedHosting = hosting
-        expandedPanel.contentView = hosting
+        configureExpandedContainer()
+        installHideAccessory()
 
         // 折叠胶囊 panel：透明、承载 SwiftUI 胶囊。
-        let capsuleHosting = NSHostingView(rootView: CollapsedReviewEntry(state: state) { [weak self] in
+        let capsuleHosting = NSHostingView(rootView: CollapsedReviewEntry(state: state, behavior: behavior) { [weak self] in
             self?.handle(.tapCapsule)
         })
         capsuleHosting.layer?.backgroundColor = .clear
-        capsulePanel.contentView = capsuleHosting
+        configureCapsuleContainer(capsuleHosting)
         capsulePanel.backgroundColor = .clear
         capsulePanel.isOpaque = false
         capsulePanel.hasShadow = false
 
+        measurementHosting = PassthroughHostingView(rootView: makeMeasurementView(maxContentSize: defaultMaxContentSize))
+        measurementHosting.alphaValue = 0
+        measurementHosting.translatesAutoresizingMaskIntoConstraints = false
+        attachMeasurementHost(to: expandedContainer, maxContentSize: defaultMaxContentSize)
+
         // 两 panel level / collectionBehavior / 释放策略保持一致（防跳层 / 丢 Space，design.md §2.2）。
         for p in [expandedPanel, capsulePanel] {
-            p.isFloatingPanel = true
-            p.level = .floating
+            applyLevel(to: p)
             p.hidesOnDeactivate = false
             p.isReleasedWhenClosed = false
             p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
@@ -235,9 +252,92 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
 
     /// 构造注入了主题上限与自然尺寸回调的 ReviewView。
     private func makeReviewView(maxContentSize: CGSize) -> ReviewView {
-        ReviewView(state: state, maxContentSize: maxContentSize) { [weak self] natural in
+        ReviewView(state: state, maxContentSize: maxContentSize, isOverflowing: latestIsOverflowing)
+    }
+
+    private func makeMeasurementView(maxContentSize: CGSize) -> ReviewMeasurementView {
+        ReviewMeasurementView(state: state, maxContentSize: maxContentSize) { [weak self] natural in
             self?.updateNaturalSize(natural)
         }
+    }
+
+    private func configureExpandedContainer() {
+        expandedHosting.translatesAutoresizingMaskIntoConstraints = false
+        expandedContainer.addSubview(expandedHosting)
+        expandedPanel.contentView = expandedContainer
+        NSLayoutConstraint.activate([
+            expandedHosting.leadingAnchor.constraint(equalTo: expandedContainer.leadingAnchor),
+            expandedHosting.trailingAnchor.constraint(equalTo: expandedContainer.trailingAnchor),
+            expandedHosting.topAnchor.constraint(equalTo: expandedContainer.topAnchor),
+            expandedHosting.bottomAnchor.constraint(equalTo: expandedContainer.bottomAnchor),
+        ])
+    }
+
+    private func configureCapsuleContainer(_ capsuleHosting: NSHostingView<CollapsedReviewEntry>) {
+        capsuleHosting.translatesAutoresizingMaskIntoConstraints = false
+        capsuleContainer.addSubview(capsuleHosting)
+        capsulePanel.contentView = capsuleContainer
+        NSLayoutConstraint.activate([
+            capsuleHosting.leadingAnchor.constraint(equalTo: capsuleContainer.leadingAnchor),
+            capsuleHosting.trailingAnchor.constraint(equalTo: capsuleContainer.trailingAnchor),
+            capsuleHosting.topAnchor.constraint(equalTo: capsuleContainer.topAnchor),
+            capsuleHosting.bottomAnchor.constraint(equalTo: capsuleContainer.bottomAnchor),
+        ])
+    }
+
+    private func installHideAccessory() {
+        let button = NSButton(image: NSImage(systemSymbolName: "minus.circle",
+                                             accessibilityDescription: "隐藏为胶囊") ?? NSImage(),
+                              target: self,
+                              action: #selector(hideButtonPressed))
+        button.isBordered = false
+        button.toolTip = "隐藏为胶囊"
+        button.setButtonType(.momentaryPushIn)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(equalToConstant: 28),
+            button.heightAnchor.constraint(equalToConstant: 28),
+        ])
+        let vc = NSTitlebarAccessoryViewController()
+        vc.layoutAttribute = .right
+        vc.view = button
+        expandedPanel.addTitlebarAccessoryViewController(vc)
+    }
+
+    @objc private func hideButtonPressed() {
+        handle(.hideIcon)
+    }
+
+    private func attachMeasurementHost(to container: NSView, maxContentSize: CGSize) {
+        measurementConstraints.forEach { $0.isActive = false }
+        measurementConstraints = []
+        measurementHosting.removeFromSuperview()
+        measurementHosting.rootView = makeMeasurementView(maxContentSize: maxContentSize)
+        measurementHosting.alphaValue = 0
+        container.addSubview(measurementHosting)
+        measurementConstraints = [
+            measurementHosting.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            measurementHosting.topAnchor.constraint(equalTo: container.topAnchor),
+            measurementHosting.widthAnchor.constraint(equalToConstant: maxContentSize.width),
+        ]
+        NSLayoutConstraint.activate(measurementConstraints)
+        refreshMeasurement()
+    }
+
+    private func refreshMeasurement() {
+        let maxSize = currentMaxContentSize()
+        measurementHosting.rootView = makeMeasurementView(maxContentSize: maxSize)
+        measurementHosting.layoutSubtreeIfNeeded()
+        let fitted = measurementHosting.fittingSize
+        if fitted.width > 0, fitted.height > 0 {
+            updateNaturalSize(fitted)
+        }
+    }
+
+    private func applyLevel(to panel: NSPanel) {
+        let p = WindowLevelPolicy.policy(for: behavior)
+        panel.isFloatingPanel = p.isFloatingPanel
+        panel.level = p.level
     }
 
     /// 上屏前的兜底上限（真实上限在上屏后按 panel.screen 重算）。
@@ -251,7 +351,8 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
         expandedPanel.makeKeyAndOrderFront(nil)
         // 上屏后按真实所在屏刷新内容上限。
-        expandedHosting.rootView = makeReviewView(maxContentSize: currentMaxContentSize())
+        refreshDisplayedView()
+        attachMeasurementHost(to: expandedContainer, maxContentSize: currentMaxContentSize())
         // Esc：经 .cancelAction 移除后由此 monitor 归一为「折叠」（design.md §2.3）。
         escMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
@@ -268,18 +369,37 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         return sizing.limits(visibleFrame: vf)
     }
 
-    // MARK: - 尺寸自适应（节流 + clamp + 单调增高 + 顶边锚定，design.md §2.1c）
-
-    private func updateNaturalSize(_ natural: CGSize) {
-        guard mode == .expanded else { return }   // 折叠态不 resize 展开 panel
-        pendingResize?.cancel()
-        let item = DispatchWorkItem { [weak self] in self?.applyResize(natural) }
-        pendingResize = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(60), execute: item)
+    private func refreshDisplayedView() {
+        expandedHosting.rootView = makeReviewView(maxContentSize: currentMaxContentSize())
     }
 
-    private func applyResize(_ natural: CGSize) {
-        guard mode == .expanded else { return }
+    // MARK: - 尺寸自适应（独立测量宿主 + runloop 合并 + clamp + 顶边锚定）
+
+    private func updateNaturalSize(_ natural: CGSize) {
+        guard natural.width > 0, natural.height > 0 else { return }
+        latestNaturalSize = natural
+        let vf = (expandedPanel.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        let overflowing = sizing.isOverflowing(natural: natural, visibleFrame: vf)
+        if overflowing != latestIsOverflowing {
+            latestIsOverflowing = overflowing
+            refreshDisplayedView()
+        }
+        scheduleApplyLatestSize()
+    }
+
+    private func scheduleApplyLatestSize() {
+        guard machineState.presentation == .expanded else { return }
+        guard !resizeApplyScheduled else { return }
+        resizeApplyScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.resizeApplyScheduled = false
+            self.applyResize(self.latestNaturalSize, force: false)
+        }
+    }
+
+    private func applyResize(_ natural: CGSize, force: Bool) {
+        guard machineState.presentation == .expanded else { return }
         let vf = (expandedPanel.screen ?? NSScreen.main)?.visibleFrame ?? .zero
         let isStreaming: Bool
         switch state.phase {
@@ -288,19 +408,14 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         }
         let target = sizing.monotonicTarget(natural: natural, visibleFrame: vf,
                                             lastHeight: lastSize.height, isStreaming: isStreaming)
-        // 阈值：宽 ≥8pt、高 ≥6pt 才 resize（防流式逐帧抖动）。
-        guard abs(target.width - lastSize.width) >= 8 || abs(target.height - lastSize.height) >= 6 else { return }
+        guard force || abs(target.width - lastSize.width) > 0.5 || abs(target.height - lastSize.height) > 0.5 else { return }
         lastSize = target
         var frame = expandedPanel.frame
         let top = frame.maxY
         frame.size = expandedPanel.frameRect(forContentRect: NSRect(origin: .zero, size: target)).size
         frame.origin.y = top - frame.height   // 顶边锚定，向下增高
         keepFrameInVisibleScreen(&frame, visibleFrame: vf)
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.16
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            expandedPanel.animator().setFrame(frame, display: true)
-        }
+        expandedPanel.setFrame(frame, display: true)
     }
 
     /// 把越界 frame 平移回 visibleFrame 内（不缩放，仅平移）。
@@ -314,25 +429,40 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
 
     // MARK: - 三态迁移（纯状态机驱动）
 
+    func handleForTesting(_ event: ReviewWindowEvent) {
+        handle(event)
+    }
+
     private func handle(_ event: ReviewWindowEvent) {
-        let t = mode.reduce(event)
-        if t.cancelTask {                 // 关闭路径：委托 Coordinator 唯一 cancel 出口
-            mode = .closed
+        let outcome = machineState.reduceOutcome(event)
+        if outcome.actions.contains(.cancelTask) {                 // 关闭路径：委托 Coordinator 唯一 cancel 出口
+            machineState.presentation = .closed
             onRequestClose?()
             return
         }
-        guard t.mode != mode else { return }
-        let from = mode
-        mode = t.mode
-        switch t.mode {
-        case .collapsed: applyCollapse(from: from)
-        case .expanded:  applyExpand(from: from)
-        case .closed:    break
+        let from = machineState.presentation
+        machineState.presentation = outcome.presentation
+        for action in outcome.actions {
+            switch action {
+            case .applyLevel:
+                applyLevel(to: expandedPanel)
+                applyLevel(to: capsulePanel)
+            case .recomputeSize:
+                refreshMeasurement()
+                applyResize(latestNaturalSize, force: true)
+            case .orderCapsule:
+                applyCollapse(from: from)
+            case .orderExpanded:
+                applyExpand(from: from)
+            case .cancelTask:
+                break
+            }
         }
     }
 
     private func applyCollapse(from: ReviewWindowMode) {
-        savedExpandedFrame = expandedPanel.frame
+        attachMeasurementHost(to: capsuleContainer, maxContentSize: currentMaxContentSize())
+        applyLevel(to: capsulePanel)
         // 胶囊定位：与展开 panel 顶边对齐、水平居中，再 clamp 到 visibleFrame。
         let ef = expandedPanel.frame
         var cf = capsulePanel.frame
@@ -347,11 +477,9 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
 
     private func applyExpand(from: ReviewWindowMode) {
         capsulePanel.orderOut(nil)
-        if var f = savedExpandedFrame {
-            let vf = (expandedPanel.screen ?? NSScreen.main)?.visibleFrame ?? .zero
-            keepFrameInVisibleScreen(&f, visibleFrame: vf)
-            expandedPanel.setFrame(f, display: true)
-        }
+        attachMeasurementHost(to: expandedContainer, maxContentSize: currentMaxContentSize())
+        refreshDisplayedView()
+        applyLevel(to: expandedPanel)
         if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
         expandedPanel.makeKeyAndOrderFront(nil)
     }
@@ -361,9 +489,9 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
     /// 失焦 → 折叠（延迟 120ms 过滤焦点抖动，design.md §2.3）。
     func windowDidResignKey(_ notification: Notification) {
         guard (notification.object as? NSWindow) === expandedPanel else { return }
-        guard mode == .expanded else { return }
+        guard behavior == .focusCollapse, machineState.presentation == .expanded else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(120)) { [weak self] in
-            guard let self, self.mode == .expanded, !self.expandedPanel.isKeyWindow else { return }
+            guard let self, self.machineState.presentation == .expanded, !self.expandedPanel.isKeyWindow else { return }
             self.handle(.resignKey)
         }
     }
@@ -379,9 +507,8 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
     /// 真正的销毁：移除 monitor、两 panel orderOut+close、清 delegate。幂等。
     func close() {
         if let m = escMonitor { NSEvent.removeMonitor(m); escMonitor = nil }
-        pendingResize?.cancel()
-        pendingResize = nil
-        mode = .closed
+        resizeApplyScheduled = false
+        machineState.presentation = .closed
         for p in [expandedPanel, capsulePanel] {
             p.delegate = nil
             p.orderOut(nil)

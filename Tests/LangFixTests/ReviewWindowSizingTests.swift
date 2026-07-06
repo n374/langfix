@@ -38,6 +38,30 @@ final class ReviewWindowSizingTests: XCTestCase {
         XCTAssertEqual(heights, [132, 180, 260, 700], "低于 minH 夹 132；范围内取自然；超 maxH 封顶 700（末帧需内部滚动）")
     }
 
+    func testNoOverflowUntilNaturalHeightExceedsMaxH() {
+        let maxH = sizing.limits(visibleFrame: vf1600).height
+        let frames: [CGFloat] = [132, 240, 699.9, 700]
+        for h in frames {
+            XCTAssertFalse(
+                sizing.isOverflowing(natural: CGSize(width: 480, height: h), visibleFrame: vf1600),
+                "naturalH=\(h) ≤ maxH 时显示树不应包 ScrollView"
+            )
+        }
+        XCTAssertTrue(
+            sizing.isOverflowing(natural: CGSize(width: 480, height: maxH + 0.1), visibleFrame: vf1600),
+            "只有 naturalH > maxH 才允许显示树包 ScrollView"
+        )
+    }
+
+    func testFrameByFrameNaturalUnderMaxMatchesWindowHeight() {
+        let frames: [CGFloat] = [150, 220, 360, 520, 700]
+        for naturalH in frames {
+            let target = sizing.target(natural: CGSize(width: 480, height: naturalH), visibleFrame: vf1600)
+            XCTAssertEqual(target.height, naturalH, accuracy: 0.001)
+            XCTAssertFalse(sizing.isOverflowing(natural: CGSize(width: 480, height: naturalH), visibleFrame: vf1600))
+        }
+    }
+
     // MARK: 上限随分辨率按比例缩放（非固定 px）
 
     func testMaxHeightScalesWithResolution() {

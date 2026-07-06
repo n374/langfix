@@ -667,7 +667,7 @@ Round 1 基础版（`sparkles` / `checkmark.seal.fill` / `exclamationmark.triang
 
 ### 12.12 Round 2 测试策略（把 spec Round 2 TBD 具体化，交开发测试阶段落地）
 
-> spec `review-window` 里 Round 2 新增/改写 Scenario 现挂 `TBD(...)`，下表给出可落地的单测口径；开发测试阶段替换 spec 里的 TBD 为真实测试路径。SwiftUI View body / NSPanel 机械层由手工 UI 验收兜底。
+> spec `review-window` 里 Round 2 新增/改写 Scenario 已由开发测试阶段替换为真实测试路径；下表保留设计阶段给出的可落地单测口径。SwiftUI View body / NSPanel 面板机械层由手工 UI 验收兜底。
 
 | spec Scenario（Round 2） | 测试落点 | 断言 |
 |---|---|---|
@@ -718,7 +718,7 @@ Round 1 基础版（`sparkles` / `checkmark.seal.fill` / `exclamationmark.triang
 
 ### 12.16 Round 2 后续动作建议（开发测试阶段）
 
-- 建议落地顺序：① `WindowBehaviorMode` + 状态机改 action 化 + `.hideIcon`（纯逻辑、先补 3×事件矩阵单测）→ ② 常驻 measurement host + `isOverflowing` 注入 + 去 debounce（Bug1，正确性优先）→ ③ `applyExpand` 重算（Bug2）→ ④ `applyLevel` 两 panel 两态 + `windowDidResignKey` 仅 A → ⑤ 设置三模式卡片 + `windowBehaviorModeRaw` 持久化 + 标题栏隐藏图标 → ⑥ 把 spec Round 2 的 `TBD(...)` 替换为真实测试路径（§12.12）+ 手工 UI 验收。
+- 建议落地顺序：① `WindowBehaviorMode` + 状态机改 action 化 + `.hideIcon`（纯逻辑、先补 3×事件矩阵单测）→ ② 常驻 measurement host + `isOverflowing` 注入 + 去 debounce（Bug1，正确性优先）→ ③ `applyExpand` 重算（Bug2）→ ④ `applyLevel` 两 panel 两态 + `windowDidResignKey` 仅 A → ⑤ 设置三模式卡片 + `windowBehaviorModeRaw` 持久化 + 标题栏隐藏图标 → ⑥ spec Round 2 覆盖测试路径替换 + 手工 UI 验收。
 - **dev↔test 内循环边界**：开发官落地②③ 时必须**主动做 Bug1/Bug2 的失败/边界验收**（不是只跑 happy-path）——Bug1 逐帧断言「≤maxH 无 scroller」、Bug2 断言「展开尺寸 == 当刻重算 ≠ 折叠前」；测试阶段独立复核这两条正确性红线（不因触发概率降级）。
 - 无离线数据/对账；无新埋点/监控（折叠三态不记录内容，仅本地状态）。
 

@@ -21,6 +21,8 @@ final class SettingsStore: ObservableObject {
     /// 弹窗主题（非敏感偏好）：只存 `ReviewThemeID.rawValue`（Material 不可 Codable），
     /// 不进 `AppConfig`（与 AI 引擎无关）。切换即时生效由 SwiftUI @Published 触发重绘。
     @Published var reviewThemeRaw: String { didSet { d.set(reviewThemeRaw, forKey: K.reviewTheme) } }
+    /// 窗口行为模式（非敏感偏好）：开窗时捕获，已打开窗口下次生效。
+    @Published var windowBehaviorModeRaw: String { didSet { d.set(windowBehaviorModeRaw, forKey: K.windowBehaviorMode) } }
 
     private enum K {
         static let baseURL = "baseURL"
@@ -33,6 +35,7 @@ final class SettingsStore: ObservableObject {
         static let structuredMode = "structuredMode"
         static let streamingEnabled = "streamingEnabled"
         static let reviewTheme = "reviewTheme"
+        static let windowBehaviorMode = "windowBehaviorMode"
     }
 
     private init() {
@@ -45,6 +48,7 @@ final class SettingsStore: ObservableObject {
             K.structuredMode: StructuredMode.auto.rawValue,
             K.streamingEnabled: true,   // 默认开启流式（旧用户升级后默认 true）
             K.reviewTheme: ReviewThemeID.defaultID.rawValue,   // 默认 Aurora Glass（旧用户升级即得默认）
+            K.windowBehaviorMode: WindowBehaviorMode.defaultMode.rawValue,   // 默认 C：普通窗口
         ])
         baseURL = d.string(forKey: K.baseURL) ?? ""
         model = d.string(forKey: K.model) ?? ""
@@ -56,6 +60,7 @@ final class SettingsStore: ObservableObject {
         structuredModeRaw = d.string(forKey: K.structuredMode) ?? StructuredMode.auto.rawValue
         streamingEnabled = d.bool(forKey: K.streamingEnabled)   // register 默认 true → 未设置时返回 true
         reviewThemeRaw = d.string(forKey: K.reviewTheme) ?? ReviewThemeID.defaultID.rawValue
+        windowBehaviorModeRaw = d.string(forKey: K.windowBehaviorMode) ?? WindowBehaviorMode.defaultMode.rawValue
     }
 
     var structuredMode: StructuredMode {
@@ -65,6 +70,11 @@ final class SettingsStore: ObservableObject {
     /// 当前选中的主题（非法 rawValue 自动 fallback 默认）。
     var reviewTheme: ReviewTheme {
         ReviewThemeCatalog.theme(ReviewThemeID(rawValueOrDefault: reviewThemeRaw))
+    }
+
+    /// 当前窗口行为模式（非法 rawValue 自动 fallback 默认 C）。
+    var windowBehaviorMode: WindowBehaviorMode {
+        WindowBehaviorMode(rawValueOrDefault: windowBehaviorModeRaw)
     }
 
     /// 组装传给引擎的配置快照（含 Keychain 里的 key）。

@@ -21,4 +21,57 @@ final class ReviewWindowStyleTests: XCTestCase {
         XCTAssertTrue(ReviewWindowStyle.capsule.contains(.nonactivatingPanel))
         XCTAssertFalse(ReviewWindowStyle.capsule.contains(.resizable))
     }
+
+    func testWindowLevelPolicyFollowsBehavior() {
+        let focus = WindowLevelPolicy.policy(for: .focusCollapse)
+        XCTAssertEqual(focus.level, .normal)
+        XCTAssertFalse(focus.isFloatingPanel)
+
+        let top = WindowLevelPolicy.policy(for: .alwaysOnTop)
+        XCTAssertEqual(top.level, .floating)
+        XCTAssertTrue(top.isFloatingPanel)
+
+        let normal = WindowLevelPolicy.policy(for: .normal)
+        XCTAssertEqual(normal.level, .normal)
+        XCTAssertFalse(normal.isFloatingPanel)
+    }
+
+    @MainActor
+    func testControllerInitializesAndClosesWithoutOrderingWindows() {
+        _ = NSApplication.shared
+        let state = ReviewState()
+        state.phase = .loading
+        let controller = ReviewWindowController(state: state, behavior: .normal)
+        controller.close()
+    }
+
+    @MainActor
+    func testControllerHandlesCollapseExpandAndCloseEvents() {
+        _ = NSApplication.shared
+        let state = ReviewState()
+        state.phase = .loading
+        var closeCalls = 0
+        let controller = ReviewWindowController(state: state, behavior: .alwaysOnTop)
+        controller.onRequestClose = { closeCalls += 1 }
+        controller.handleForTesting(.hideIcon)
+        controller.handleForTesting(.tapCapsule)
+        controller.handleForTesting(.closeRequested)
+        XCTAssertEqual(closeCalls, 1)
+        controller.close()
+    }
+
+    @MainActor
+    func testReviewViewBodyEvaluatesDirectContentBranch() {
+        let state = ReviewState()
+        state.phase = .loading
+        _ = ReviewView(state: state,
+                       maxContentSize: CGSize(width: 480, height: 700),
+                       isOverflowing: false).body
+        _ = ReviewView(state: state,
+                       maxContentSize: CGSize(width: 480, height: 700),
+                       isOverflowing: true).body
+        _ = ReviewMeasurementView(state: state,
+                                  maxContentSize: CGSize(width: 480, height: 700),
+                                  onNaturalSizeChange: { _ in }).body
+    }
 }

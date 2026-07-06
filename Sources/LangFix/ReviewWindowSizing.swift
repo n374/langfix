@@ -32,6 +32,12 @@ struct ReviewWindowSizing: Equatable {
                       height: min(max(natural.height, minHeight),     m.height))
     }
 
+    /// 显示树是否需要滚动容器。Bug1 的结构保证依赖此谓词：
+    /// natural.height 未超过 maxH 时显示树直渲内容；只有真正超过 maxH 才包 ScrollView。
+    func isOverflowing(natural: CGSize, visibleFrame vf: CGRect) -> Bool {
+        natural.height > limits(visibleFrame: vf).height
+    }
+
     /// 带单调增高守卫的目标尺寸：loading/streaming 阶段高度只增不减（配合单调前缀守卫，防抖不闪缩）。
     /// 非流式阶段（result/error 收敛）不强制单调，但调用方通常也不主动缩小以避免闪跳。
     func monotonicTarget(natural: CGSize, visibleFrame vf: CGRect,

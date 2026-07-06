@@ -1,4 +1,44 @@
 import SwiftUI
+import AppKit
+
+/// 用户可选窗口行为模式。该偏好为非敏感 UI 偏好，持久化到 UserDefaults（默认 C）。
+enum WindowBehaviorMode: String, CaseIterable, Identifiable, Sendable {
+    case focusCollapse
+    case alwaysOnTop
+    case normal
+
+    var id: String { rawValue }
+
+    static let defaultMode: WindowBehaviorMode = .normal
+
+    init(rawValueOrDefault raw: String?) {
+        self = WindowBehaviorMode(rawValue: raw ?? "") ?? .defaultMode
+    }
+
+    var title: String {
+        switch self {
+        case .focusCollapse: return "失焦折叠"
+        case .alwaysOnTop: return "始终置顶"
+        case .normal: return "默认窗口"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .focusCollapse: return "切到别处自动变胶囊；Esc / 隐藏也会折叠"
+        case .alwaysOnTop: return "窗口和胶囊都保持置顶；Esc / 隐藏可暂收"
+        case .normal: return "像普通窗口一样可被遮挡；Esc / 隐藏可收起"
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .focusCollapse: return "eye.slash"
+        case .alwaysOnTop: return "pin.fill"
+        case .normal: return "macwindow"
+        }
+    }
+}
 
 /// 弹窗容器三态，与 AI 业务态 `ReviewState.Phase` 完全解耦（design.md §2.2 决策 D3）。
 /// - expanded：展开面板可见、可交互
@@ -14,38 +54,77 @@ enum ReviewWindowMode: Equatable, Sendable {
 enum ReviewWindowEvent: Equatable, Sendable {
     case resignKey       // 失焦（点到别处）
     case esc             // 按下 Esc（经 .cancelAction 修正后只折叠，不再关闭）
+    case hideIcon        // 标题栏隐藏图标
     case tapCapsule      // 点击折叠胶囊
     case closeRequested  // 关闭按钮 / 取消按钮 / 标题栏关闭
 }
 
-/// 一次迁移的结果：目标态 + 是否需要取消底层 Task。
-///
-/// **正确性核心**：`cancelTask` 仅在关闭路径为 `true`；失焦 / Esc / 点击胶囊一律 `false`
-/// （回归现状「onClose 不 cancel」的 bug，见 design.md §2.4 / 决策 D4）。
+enum ReviewWindowAction: Equatable, Sendable {
+    case applyLevel
+    case recomputeSize
+    case cancelTask
+    case orderCapsule
+    case orderExpanded
+}
+
+struct ReviewWindowOutcome: Equatable, Sendable {
+    var presentation: ReviewWindowMode
+    var actions: [ReviewWindowAction]
+}
+
+/// 单一状态机：开窗时捕获 behavior，运行期只迁移 presentation。
+struct ReviewWindowMachineState: Equatable, Sendable {
+    var behavior: WindowBehaviorMode
+    var presentation: ReviewWindowMode
+
+    func reduce(_ event: ReviewWindowEvent) -> ReviewWindowTransition {
+        let outcome = reduceOutcome(event)
+        return ReviewWindowTransition(mode: outcome.presentation, cancelTask: outcome.actions.contains(.cancelTask))
+    }
+
+    func reduceOutcome(_ event: ReviewWindowEvent) -> ReviewWindowOutcome {
+        if presentation == .closed { return ReviewWindowOutcome(presentation: .closed, actions: []) }
+
+        switch (presentation, event) {
+        case (.expanded, .resignKey):
+            return behavior == .focusCollapse
+                ? ReviewWindowOutcome(presentation: .collapsed, actions: [.orderCapsule, .applyLevel])
+                : ReviewWindowOutcome(presentation: .expanded, actions: [])
+        case (.expanded, .esc), (.expanded, .hideIcon):
+            return ReviewWindowOutcome(presentation: .collapsed, actions: [.orderCapsule, .applyLevel])
+        case (.collapsed, .tapCapsule):
+            return ReviewWindowOutcome(presentation: .expanded, actions: [.recomputeSize, .applyLevel, .orderExpanded])
+        case (_, .closeRequested):
+            return ReviewWindowOutcome(presentation: .closed, actions: [.cancelTask])
+        default:
+            return ReviewWindowOutcome(presentation: presentation, actions: [])
+        }
+    }
+}
+
+/// 旧测试/关闭语义测试仍可用的轻量兼容结构。
 struct ReviewWindowTransition: Equatable, Sendable {
     var mode: ReviewWindowMode
     var cancelTask: Bool
 }
 
 extension ReviewWindowMode {
-    /// 纯状态机 reduce：给定当前态与事件，返回下一态与副作用标志。无副作用、可单测。
+    /// Round1 兼容入口：按 A（失焦折叠）解释旧状态机语义。
     func reduce(_ event: ReviewWindowEvent) -> ReviewWindowTransition {
-        // closed 是终态，任何事件都幂等无副作用（不再取消、不再改 UI）。
-        if self == .closed { return ReviewWindowTransition(mode: .closed, cancelTask: false) }
+        ReviewWindowMachineState(behavior: .focusCollapse, presentation: self).reduce(event)
+    }
+}
 
-        switch (self, event) {
-        case (.expanded, .resignKey), (.expanded, .esc):
-            // 失焦 / Esc → 折叠，绝不取消（后台流式继续）。
-            return ReviewWindowTransition(mode: .collapsed, cancelTask: false)
-        case (.collapsed, .tapCapsule):
-            // 点击胶囊 → 展开恢复。
-            return ReviewWindowTransition(mode: .expanded, cancelTask: false)
-        case (_, .closeRequested):
-            // 关闭是唯一 cancel 路径：销毁 + 取消底层 Task。
-            return ReviewWindowTransition(mode: .closed, cancelTask: true)
-        default:
-            // 其余组合（如 collapsed 下的 resignKey/esc、expanded 下的 tapCapsule）为无意义 no-op。
-            return ReviewWindowTransition(mode: self, cancelTask: false)
+struct WindowLevelPolicy: Equatable, Sendable {
+    var level: NSWindow.Level
+    var isFloatingPanel: Bool
+
+    static func policy(for behavior: WindowBehaviorMode) -> WindowLevelPolicy {
+        switch behavior {
+        case .alwaysOnTop:
+            return WindowLevelPolicy(level: .floating, isFloatingPanel: true)
+        case .focusCollapse, .normal:
+            return WindowLevelPolicy(level: .normal, isFloatingPanel: false)
         }
     }
 }

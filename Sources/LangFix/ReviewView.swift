@@ -16,30 +16,60 @@ struct ReviewView: View {
     @ObservedObject private var settings = SettingsStore.shared
     /// 屏幕相对内容上限（controller 注入）：超上限维度由外层 ScrollView 内部滚动承载。
     var maxContentSize: CGSize = CGSize(width: 480, height: 700)
-    /// 自然尺寸变化回调（controller 据此节流 + clamp + setFrame）。
+    /// 来自独立测量宿主的 overflow 判定。false 时显示树不包 ScrollView，结构上无纵向滚动条。
+    var isOverflowing: Bool = false
+
+    private var theme: ReviewTheme { settings.reviewTheme }
+
+    var body: some View {
+        Group {
+            if isOverflowing {
+                ScrollView {
+                    content
+                }
+            } else {
+                content
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: maxContentSize.width, maxHeight: maxContentSize.height)
+        .background(theme.windowBackground)
+        .animation(.easeOut(duration: theme.animationDuration), value: theme.id)
+    }
+
+    private var content: some View {
+        ReviewContent(state: state, theme: theme)
+            .frame(maxWidth: maxContentSize.width, alignment: .leading)
+    }
+}
+
+/// 独立测量宿主：与显示树解耦，永远无 ScrollView，专门产出内容自然尺寸。
+struct ReviewMeasurementView: View {
+    @ObservedObject var state: ReviewState
+    @ObservedObject private var settings = SettingsStore.shared
+    var maxContentSize: CGSize = CGSize(width: 480, height: 700)
     var onNaturalSizeChange: (CGSize) -> Void = { _ in }
 
     private var theme: ReviewTheme { settings.reviewTheme }
 
     var body: some View {
-        ScrollView {
-            phaseContent
-                .frame(maxWidth: maxContentSize.width, alignment: .leading)
-                // fixedSize(vertical) 让内容按自然高布局，测量到的是真实内容高而非被 ScrollView 撑满。
-                .fixedSize(horizontal: false, vertical: true)
-                .background(
-                    GeometryReader { p in
-                        Color.clear.preference(key: NaturalSizeKey.self, value: p.size)
-                    }
-                )
-        }
-        .frame(maxWidth: maxContentSize.width, maxHeight: maxContentSize.height)
-        .background(theme.windowBackground)
-        .onPreferenceChange(NaturalSizeKey.self, perform: onNaturalSizeChange)
-        .animation(.easeOut(duration: theme.animationDuration), value: theme.id)
+        ReviewContent(state: state, theme: theme)
+            .frame(maxWidth: maxContentSize.width, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .background(
+                GeometryReader { p in
+                    Color.clear.preference(key: NaturalSizeKey.self, value: p.size)
+                }
+            )
+            .onPreferenceChange(NaturalSizeKey.self, perform: onNaturalSizeChange)
     }
+}
 
-    @ViewBuilder private var phaseContent: some View {
+private struct ReviewContent: View {
+    @ObservedObject var state: ReviewState
+    let theme: ReviewTheme
+
+    @ViewBuilder var body: some View {
         switch state.phase {
         case .loading:
             LoadingView(theme: theme, onCancel: { state.onCancel?() })
@@ -326,6 +356,7 @@ private struct IssueCard: View {
 struct CollapsedReviewEntry: View {
     @ObservedObject var state: ReviewState
     @ObservedObject private var settings = SettingsStore.shared
+    let behavior: WindowBehaviorMode
     let onExpand: () -> Void
 
     private var theme: ReviewTheme { settings.reviewTheme }
@@ -338,10 +369,15 @@ struct CollapsedReviewEntry: View {
                     .symbolEffectPulseIfWorking(status == .working)
                 Text(status.title)
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
+                if behavior == .alwaysOnTop {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                        .opacity(0.72)
+                }
             }
             .foregroundColor(theme.collapsedForeground)
             .padding(.horizontal, 14)
-            .frame(width: 132, height: 44)
+            .frame(width: 148, height: 44)
             .background(theme.material)
             .overlay(Capsule().stroke(status.color(theme), lineWidth: 1.2))
             .shadow(color: status.color(theme).opacity(theme.glowOpacity), radius: 12)
