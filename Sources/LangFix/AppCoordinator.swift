@@ -189,8 +189,8 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
     private let sizing = ReviewWindowSizing()
     private var machineState: ReviewWindowMachineState
     /// 上次应用的窗口 contentSize（节流阈值 + 单调增高守卫的比较基准）。
-    private var lastSize: CGSize = CGSize(width: 480, height: 200)
-    private var latestNaturalSize: CGSize = CGSize(width: 480, height: 200)
+    private var lastSize: CGSize = CGSize(width: ReviewWindowSizing.minWidth, height: 200)
+    private var latestNaturalSize: CGSize = CGSize(width: ReviewWindowSizing.minWidth, height: 200)
     private var latestIsOverflowing = false
     private var resizeApplyScheduled = false
     private var measurementConstraints: [NSLayoutConstraint] = []
@@ -203,7 +203,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         self.behavior = behavior
         self.machineState = ReviewWindowMachineState(behavior: behavior, presentation: .expanded)
         expandedPanel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 200),
+            contentRect: NSRect(x: 0, y: 0, width: ReviewWindowSizing.minWidth, height: 200),
             styleMask: ReviewWindowStyle.expanded,   // 已去 .resizable：尺寸全自动
             backing: .buffered, defer: false
         )
@@ -220,6 +220,9 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         // 展开 panel。
         expandedPanel.title = "LangFix"
         expandedPanel.titlebarAppearsTransparent = true
+        expandedPanel.backgroundColor = .clear
+        expandedPanel.isOpaque = false
+        expandedPanel.hasShadow = true
         let hosting = NSHostingView(rootView: makeReviewView(maxContentSize: defaultMaxContentSize))
         expandedHosting = hosting
         configureExpandedContainer()
@@ -431,6 +434,10 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
 
     func handleForTesting(_ event: ReviewWindowEvent) {
         handle(event)
+    }
+
+    func expandedPanelAppearanceForTesting() -> (isOpaque: Bool, backgroundColor: NSColor?) {
+        (expandedPanel.isOpaque, expandedPanel.backgroundColor)
     }
 
     private func handle(_ event: ReviewWindowEvent) {

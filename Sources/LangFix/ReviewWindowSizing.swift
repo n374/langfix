@@ -8,12 +8,12 @@ import CoreGraphics
 /// - 上限一律屏幕相对（禁固定 px），保证不同分辨率下上限比例一致；
 /// - 超上限的维度由内容区内部 `ScrollView` 承载。
 ///
-/// 窄屏兜底（design.md §8 Q1 决策 D2）：`visibleW < 1200pt` 时 `visibleW×0.4 < 480`，
-/// 区间 `[480, maxW]` 数学非法。故 `maxW = max(minWidth, visibleW×widthRatio)`——
-/// 常规屏遵守 40% 相对上限，极窄屏以 480pt 最小可用宽兜底。高同理用 `max(minHeight, …)`。
+/// 窄屏兜底（design.md §8 Q1 决策 D2）：`visibleW < 1200pt` 时 `visibleW×0.28 < 336`，
+/// 区间 `[336, maxW]` 数学非法。故 `maxW = max(minWidth, visibleW×widthRatio)`——
+/// 常规屏遵守 28% 相对上限，极窄屏以 336pt 最小可用宽兜底。高同理用 `max(minHeight, …)`。
 struct ReviewWindowSizing: Equatable {
-    static let minWidth: CGFloat = 480
-    static let widthRatio: CGFloat = 0.4
+    static let minWidth: CGFloat = 336
+    static let widthRatio: CGFloat = 0.28
     static let heightRatio: CGFloat = 0.7
 
     /// 容纳透明标题栏 + 首行状态 + footer 的自然最小高（内容驱动，天然分辨率无关）。
@@ -43,7 +43,15 @@ struct ReviewWindowSizing: Equatable {
     func monotonicTarget(natural: CGSize, visibleFrame vf: CGRect,
                          lastHeight: CGFloat, isStreaming: Bool) -> CGSize {
         var t = target(natural: natural, visibleFrame: vf)
-        if isStreaming { t.height = max(lastHeight, t.height) }
+        let maxHeight = limits(visibleFrame: vf).height
+        if isStreaming {
+            // 若上一帧因布局瞬态被撑到 maxH，但当前自然高度仍低于 maxH，
+            // 允许回落，避免短内容在流式开始后被 70% 屏高锁死。
+            if lastHeight >= maxHeight, natural.height < maxHeight {
+                return t
+            }
+            t.height = max(lastHeight, t.height)
+        }
         return t
     }
 }

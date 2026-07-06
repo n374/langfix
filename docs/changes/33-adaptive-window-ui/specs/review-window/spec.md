@@ -14,13 +14,13 @@
 ## ADDED Requirements
 
 ### Requirement: 弹窗尺寸随内容实时自适应
-THE SYSTEM SHALL 令弹窗宽度与高度均等于当前内容的自然尺寸，并各自 clamp 到屏幕相对范围——宽度 clamp 到 `[minW, maxW]`（`minW = 480pt`，`maxW = 弹窗所在屏 visibleFrame 宽度 × 0.4`），高度 clamp 到 `[minH, maxH]`（`minH` 为容纳标题栏与首行状态的内容自然高度，`maxH = 同屏 visibleFrame 高度 × 0.7`）。WHILE 流式内容持续增长 THE SYSTEM SHALL 令弹窗高度随内容**实时**增长。WHILE 内容自然高度 ≤ `maxH` THE SYSTEM SHALL 令弹窗完整容纳内容且内容区**不出现纵向滚动条/滑块**。IF 内容自然高度 > `maxH` THEN THE SYSTEM SHALL 将高度封顶为 `maxH` 并由内容区内部滚动承载超出部分。
+THE SYSTEM SHALL 令弹窗宽度与高度均等于当前内容的自然尺寸，并各自 clamp 到屏幕相对范围——宽度 clamp 到 `[minW, maxW]`（`minW = 336pt`，`maxW = 弹窗所在屏 visibleFrame 宽度 × 0.28`），高度 clamp 到 `[minH, maxH]`（`minH` 为容纳标题栏与首行状态的内容自然高度，`maxH = 同屏 visibleFrame 高度 × 0.7`）。WHILE 流式内容持续增长 THE SYSTEM SHALL 令弹窗高度随内容**实时**增长。WHILE 内容自然高度 ≤ `maxH` THE SYSTEM SHALL 令弹窗完整容纳内容且内容区**不出现纵向滚动条/滑块**。IF 内容自然高度 > `maxH` THEN THE SYSTEM SHALL 将高度封顶为 `maxH` 并由内容区内部滚动承载超出部分。
 
-> 约束：宽、高上限**均以屏幕相对尺寸计算**（不得用固定像素上限），使不同分辨率下上限比例一致。`minW` 用户原话「不小于 48」判读为 480pt（见 proposal §6 Q1）。
+> 约束：宽、高上限**均以屏幕相对尺寸计算**（不得用固定像素上限），使不同分辨率下上限比例一致。round3 用户实测反馈要求「宽度再减少 30%」，故 round2 的 `480pt / 0.4` 同步收窄为 `336pt / 0.28`。
 >
 > **round2 正确性红线（Bug1）**：滚动条只在「内容真正超过 `maxH`」这一唯一条件下出现。任何「内容 ≤ `maxH` 却出现纵向滚动条/滑块」都是正确性缺陷（窗口没有把自己撑到内容高度），happy-path 出现即验收不通过。参见 proposal §9。
 >
-> **实现备注（非规范性，来自 design.md §8 Q1 + Codex 交叉评审）**：当屏 `visibleFrame.width < 1200pt` 时 `maxW = visibleW×0.4 < minW=480`，`[480, maxW]` 数学非法。落地采用 `maxW = max(480, visibleW×0.4)`——常规屏遵守 40% 相对上限，极窄屏以 480pt 最小可用宽兜底（此时字面超过屏 40%）。判为实现层合理降级，未改动本 Requirement 的规范语义；个人 macOS 划词工具窄于 1200pt 极罕见。若需「任何情况绝不超 40%」，改为窄屏允许低于 480 即可。
+> **实现备注（非规范性，来自 design.md §8 Q1 + round3 用户实测反馈）**：当屏 `visibleFrame.width < 1200pt` 时 `maxW = visibleW×0.28 < minW=336`，`[336, maxW]` 数学非法。落地采用 `maxW = max(336, visibleW×0.28)`——常规屏遵守 28% 相对上限，极窄屏以 336pt 最小可用宽兜底（此时字面超过屏 28%）。若需「任何情况绝不超 28%」，改为窄屏允许低于 336 即可。
 
 #### Scenario: 短内容出小窗
 - **GIVEN** 弹窗展示的内容仅一行修正结果（自然宽/高均 < 各自上限）
@@ -32,7 +32,7 @@ THE SYSTEM SHALL 令弹窗宽度与高度均等于当前内容的自然尺寸，
 #### Scenario: 宽度按屏幕相对范围 clamp
 - **GIVEN** 内容自然宽度分别小于 `minW`、位于范围内、大于 `maxW`
 - **WHEN** 弹窗渲染
-- **THEN** 窗口宽度分别被夹到 `minW(=480)`、取内容自然宽、夹到 `maxW(=屏宽×0.4)`；超 `maxW` 时内容横向由内部布局承载而非撑破窗口
+- **THEN** 窗口宽度分别被夹到 `minW(=336)`、取内容自然宽、夹到 `maxW(=屏宽×0.28)`；超 `maxW` 时内容横向由内部布局承载而非撑破窗口
 
 **覆盖测试**: `Tests/LangFixTests/ReviewWindowSizingTests.swift::testWidthClampThreeBuckets`
 

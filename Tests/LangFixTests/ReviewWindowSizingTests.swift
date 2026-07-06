@@ -5,14 +5,14 @@ import CoreGraphics
 /// 覆盖 spec review-window「弹窗尺寸随内容自适应」的四个 Scenario（纯策略逻辑）。
 final class ReviewWindowSizingTests: XCTestCase {
     private let sizing = ReviewWindowSizing()   // minHeight = 132
-    /// 1600×1000 屏 → maxW=640(=1600×0.4)、maxH=700(=1000×0.7)。
+    /// 1600×1000 屏 → maxW=448(=1600×0.28)、maxH=700(=1000×0.7)。
     private let vf1600 = CGRect(x: 0, y: 0, width: 1600, height: 1000)
 
     // MARK: 短内容出小窗
 
     func testShortContentYieldsSmallWindow() {
         let t = sizing.target(natural: CGSize(width: 300, height: 90), visibleFrame: vf1600)
-        XCTAssertEqual(t.width, 480, "宽 < minW 夹到 480")
+        XCTAssertEqual(t.width, 336, "宽 < minW 夹到 336")
         XCTAssertEqual(t.height, 132, "高 < minH 夹到 minH=132（贴近内容自然高，不撑满高）")
         XCTAssertLessThan(t.height, sizing.limits(visibleFrame: vf1600).height, "短内容高远小于 maxH")
     }
@@ -23,9 +23,9 @@ final class ReviewWindowSizingTests: XCTestCase {
         func w(_ nat: CGFloat) -> CGFloat {
             sizing.target(natural: CGSize(width: nat, height: 300), visibleFrame: vf1600).width
         }
-        XCTAssertEqual(w(300), 480, "小于 minW → 480")
-        XCTAssertEqual(w(560), 560, "范围内 → 取自然宽")
-        XCTAssertEqual(w(900), 640, "大于 maxW → 夹到 maxW=1600×0.4=640")
+        XCTAssertEqual(w(300), 336, "小于 minW → 336")
+        XCTAssertEqual(w(400), 400, "范围内 → 取自然宽")
+        XCTAssertEqual(w(900), 448, accuracy: 0.001, "大于 maxW → 夹到 maxW=1600×0.28=448")
     }
 
     // MARK: 流式增高到上限后滚动（末帧封顶）
@@ -33,7 +33,7 @@ final class ReviewWindowSizingTests: XCTestCase {
     func testHeightGrowsThenCapsAtMaxH() {
         let naturals: [CGFloat] = [120, 180, 260, 900]
         let heights = naturals.map {
-            sizing.target(natural: CGSize(width: 480, height: $0), visibleFrame: vf1600).height
+            sizing.target(natural: CGSize(width: 336, height: $0), visibleFrame: vf1600).height
         }
         XCTAssertEqual(heights, [132, 180, 260, 700], "低于 minH 夹 132；范围内取自然；超 maxH 封顶 700（末帧需内部滚动）")
     }
@@ -43,12 +43,12 @@ final class ReviewWindowSizingTests: XCTestCase {
         let frames: [CGFloat] = [132, 240, 699.9, 700]
         for h in frames {
             XCTAssertFalse(
-                sizing.isOverflowing(natural: CGSize(width: 480, height: h), visibleFrame: vf1600),
+                sizing.isOverflowing(natural: CGSize(width: 336, height: h), visibleFrame: vf1600),
                 "naturalH=\(h) ≤ maxH 时显示树不应包 ScrollView"
             )
         }
         XCTAssertTrue(
-            sizing.isOverflowing(natural: CGSize(width: 480, height: maxH + 0.1), visibleFrame: vf1600),
+            sizing.isOverflowing(natural: CGSize(width: 336, height: maxH + 0.1), visibleFrame: vf1600),
             "只有 naturalH > maxH 才允许显示树包 ScrollView"
         )
     }
@@ -56,9 +56,9 @@ final class ReviewWindowSizingTests: XCTestCase {
     func testFrameByFrameNaturalUnderMaxMatchesWindowHeight() {
         let frames: [CGFloat] = [150, 220, 360, 520, 700]
         for naturalH in frames {
-            let target = sizing.target(natural: CGSize(width: 480, height: naturalH), visibleFrame: vf1600)
+            let target = sizing.target(natural: CGSize(width: 336, height: naturalH), visibleFrame: vf1600)
             XCTAssertEqual(target.height, naturalH, accuracy: 0.001)
-            XCTAssertFalse(sizing.isOverflowing(natural: CGSize(width: 480, height: naturalH), visibleFrame: vf1600))
+            XCTAssertFalse(sizing.isOverflowing(natural: CGSize(width: 336, height: naturalH), visibleFrame: vf1600))
         }
     }
 
@@ -80,7 +80,7 @@ final class ReviewWindowSizingTests: XCTestCase {
         var last: CGFloat = 132
         var applied: [CGFloat] = []
         for n in naturals {
-            let t = sizing.monotonicTarget(natural: CGSize(width: 480, height: n),
+            let t = sizing.monotonicTarget(natural: CGSize(width: 336, height: n),
                                            visibleFrame: vf1600, lastHeight: last, isStreaming: true)
             last = t.height
             applied.append(t.height)
@@ -91,15 +91,21 @@ final class ReviewWindowSizingTests: XCTestCase {
 
     func testNonStreamingDoesNotForceMonotonic() {
         // 非流式（result/error 收敛）不强制单调：允许按内容回落（controller 另有阈值防抖）。
-        let t = sizing.monotonicTarget(natural: CGSize(width: 480, height: 150),
+        let t = sizing.monotonicTarget(natural: CGSize(width: 336, height: 150),
                                        visibleFrame: vf1600, lastHeight: 400, isStreaming: false)
         XCTAssertEqual(t.height, 150, "非流式不强制单调增高")
+    }
+
+    func testStreamingShortContentRecoversFromTransientMaxHeight() {
+        let t = sizing.monotonicTarget(natural: CGSize(width: 336, height: 180),
+                                       visibleFrame: vf1600, lastHeight: 700, isStreaming: true)
+        XCTAssertEqual(t.height, 180, "当前自然高未触顶时，不应被上一帧 maxH 锁死")
     }
 
     // MARK: 窄屏兜底（D2）
 
     func testNarrowScreenWidthFloor() {
-        let narrow = CGRect(x: 0, y: 0, width: 1000, height: 800)   // 1000×0.4=400 < 480
-        XCTAssertEqual(sizing.limits(visibleFrame: narrow).width, 480, "窄屏 maxW 以 480 兜底，区间不非法")
+        let narrow = CGRect(x: 0, y: 0, width: 1000, height: 800)   // 1000×0.28=280 < 336
+        XCTAssertEqual(sizing.limits(visibleFrame: narrow).width, 336, "窄屏 maxW 以 336 兜底，区间不非法")
     }
 }

@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import SwiftUI
 @testable import LangFix
 
 /// 覆盖 spec「取消手动 resize」：展开 panel styleMask 不含 .resizable。
@@ -42,6 +43,9 @@ final class ReviewWindowStyleTests: XCTestCase {
         let state = ReviewState()
         state.phase = .loading
         let controller = ReviewWindowController(state: state, behavior: .normal)
+        let appearance = controller.expandedPanelAppearanceForTesting()
+        XCTAssertFalse(appearance.isOpaque)
+        XCTAssertEqual(appearance.backgroundColor, .clear)
         controller.close()
     }
 
@@ -65,13 +69,28 @@ final class ReviewWindowStyleTests: XCTestCase {
         let state = ReviewState()
         state.phase = .loading
         _ = ReviewView(state: state,
-                       maxContentSize: CGSize(width: 480, height: 700),
+                       maxContentSize: CGSize(width: ReviewWindowSizing.minWidth, height: 700),
                        isOverflowing: false).body
         _ = ReviewView(state: state,
-                       maxContentSize: CGSize(width: 480, height: 700),
+                       maxContentSize: CGSize(width: ReviewWindowSizing.minWidth, height: 700),
                        isOverflowing: true).body
         _ = ReviewMeasurementView(state: state,
-                                  maxContentSize: CGSize(width: 480, height: 700),
+                                  maxContentSize: CGSize(width: ReviewWindowSizing.minWidth, height: 700),
                                   onNaturalSizeChange: { _ in }).body
+    }
+
+    @MainActor
+    func testShortStreamingMeasurementDoesNotFillMaxHeight() {
+        _ = NSApplication.shared
+        let state = ReviewState()
+        state.phase = .streaming(StreamingPreview(corrected: "A short fix."))
+        let host = NSHostingView(rootView: ReviewMeasurementView(
+            state: state,
+            maxContentSize: CGSize(width: ReviewWindowSizing.minWidth, height: 700),
+            onNaturalSizeChange: { _ in }
+        ))
+        host.frame = NSRect(x: 0, y: 0, width: ReviewWindowSizing.minWidth, height: 1)
+        host.layoutSubtreeIfNeeded()
+        XCTAssertLessThan(host.fittingSize.height, 300)
     }
 }

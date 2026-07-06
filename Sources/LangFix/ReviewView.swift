@@ -15,7 +15,7 @@ struct ReviewView: View {
     /// 观察设置以实现主题「切换即时生效」（@Published → 自动重绘）。
     @ObservedObject private var settings = SettingsStore.shared
     /// 屏幕相对内容上限（controller 注入）：超上限维度由外层 ScrollView 内部滚动承载。
-    var maxContentSize: CGSize = CGSize(width: 480, height: 700)
+    var maxContentSize: CGSize = CGSize(width: ReviewWindowSizing.minWidth, height: 700)
     /// 来自独立测量宿主的 overflow 判定。false 时显示树不包 ScrollView，结构上无纵向滚动条。
     var isOverflowing: Bool = false
 
@@ -32,7 +32,7 @@ struct ReviewView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .frame(maxWidth: maxContentSize.width, maxHeight: maxContentSize.height)
+        .frame(maxWidth: maxContentSize.width, maxHeight: maxContentSize.height, alignment: .topLeading)
         .background(theme.windowBackground)
         .animation(.easeOut(duration: theme.animationDuration), value: theme.id)
     }
@@ -47,7 +47,7 @@ struct ReviewView: View {
 struct ReviewMeasurementView: View {
     @ObservedObject var state: ReviewState
     @ObservedObject private var settings = SettingsStore.shared
-    var maxContentSize: CGSize = CGSize(width: 480, height: 700)
+    var maxContentSize: CGSize = CGSize(width: ReviewWindowSizing.minWidth, height: 700)
     var onNaturalSizeChange: (CGSize) -> Void = { _ in }
 
     private var theme: ReviewTheme { settings.reviewTheme }

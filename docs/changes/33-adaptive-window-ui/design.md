@@ -34,8 +34,8 @@
 
 ```swift
 struct ReviewWindowSizing {
-    static let minWidth: CGFloat = 480
-    static let widthRatio: CGFloat = 0.4
+    static let minWidth: CGFloat = 336
+    static let widthRatio: CGFloat = 0.28
     static let heightRatio: CGFloat = 0.7
     var minHeight: CGFloat = 132   // 容纳透明标题栏 + 首行状态 + footer 的自然最小高
 
@@ -53,7 +53,7 @@ struct ReviewWindowSizing {
 }
 ```
 
-- `minW = 480`，`maxW = 所在屏 visibleFrame.width × 0.4`；`minH ≈ 132`（内容驱动，天然分辨率无关），`maxH = 所在屏 visibleFrame.height × 0.7`。
+- `minW = 336`，`maxW = 所在屏 visibleFrame.width × 0.28`；`minH ≈ 132`（内容驱动，天然分辨率无关），`maxH = 所在屏 visibleFrame.height × 0.7`。
 - **所在屏取 `panel.screen ?? NSScreen.main`**；panel 未上屏时先 `center()`，上屏后首次 resize 再按真实 `panel.screen` 计算（多屏正确）。
 - 超上限的维度由内容区内部 `ScrollView` 承载。
 
@@ -324,7 +324,7 @@ Picker("弹窗主题", selection: $settings.reviewThemeRaw) {
 | 决策点 | 选择 | 备选 | 理由 | 关联 |
 |---|---|---|---|---|
 | D1 折叠实现 | **双 panel 共享 ReviewState** | 同窗切 styleMask 变形 | 展开/折叠是两种窗口语义（key/Esc/失焦/标题栏 vs borderless/nonactivating/自绘胶囊）；运行时切 styleMask 是 AppKit 最脆处，收益仅连续动画不值得。orderOut 不销毁 → 局部 @State 同样保活 | Codex 复审改判认同（§10） |
-| D2 窄屏宽度冲突 | `maxW = max(480, visibleW×0.4)`（窄屏保 480 可用宽优先） | 严格 ≤40%（窄屏可低于 480） | `visibleW<1200pt` 时 `[480, visibleW×0.4]` 数学非法；个人 macOS 划词工具窄于 1200 极罕见。属实现层合理兜底，非改用户硬约束（Codex 同判 (a)） | §8 Q1 |
+| D2 窄屏宽度冲突 | `maxW = max(336, visibleW×0.28)`（窄屏保 336 可用宽优先） | 严格 ≤28%（窄屏可低于 336） | round3 用户要求宽度再减 30%，由 `480/0.4` 等比收窄为 `336/0.28`；极窄屏仍以最小可用宽兜底 | §8 Q1 |
 | D3 窗口态载体 | controller 持 `ReviewWindowMode`，不塞进 `Phase` | 复用 `ReviewState.Phase` | Phase 是 AI 任务态；展开/折叠是容器态，耦合会污染流式逻辑 | §2.2 |
 | D4 关闭语义 | close = cancel（幂等单一路径）；Esc/失焦不 cancel | 维持 onClose 不 cancel | 现状 onClose 不 cancel 与需求「关闭=销毁+取消」直接冲突，是正确性缺口 | §2.4 |
 | D5 默认主题 | Aurora Glass | 其余 3 套 | 最不抢内容又满足科幻/艺术调性；明/暗环境可读 | §2.7 |
@@ -360,8 +360,8 @@ Picker("弹窗主题", selection: $settings.reviewThemeRaw) {
 
 | spec Scenario | 测试落点 | 断言 |
 |---|---|---|
-| 短内容出小窗 | `ReviewWindowSizingTests` + `NSHostingView.fittingSize` smoke | 移除 minHeight 后短内容自然高 ≪ maxH；宽∈[480,maxW] |
-| 宽度按屏幕相对 clamp | `ReviewWindowSizingTests` | `target(300,vf1600).w==480`；`560→560`；`900→640(=1600×0.4)` |
+| 短内容出小窗 | `ReviewWindowSizingTests` + `NSHostingView.fittingSize` smoke | 移除 minHeight 后短内容自然高 ≪ maxH；宽∈[336,maxW] |
+| 宽度按屏幕相对 clamp | `ReviewWindowSizingTests` | `target(300,vf1600).w==336`；`400→400`；`900→448(=1600×0.28)` |
 | 流式增高到上限后滚动 | `ReviewWindowSizingTests` 序列 | 自然高 `[120,180,260,900]`，vf.h=1000 → `[132,180,260,700]`，末帧需内部滚动 |
 | 上限随分辨率按比例缩放 | `ReviewWindowSizingTests` 双 vf | vf.h=1000→maxH=700；vf.h=1400→maxH=980（比例非固定 px） |
 | 高度单调不减 | `ReviewWindowSizingTests` | streaming 下多帧调用高度序列单调不减 |
@@ -388,7 +388,7 @@ Picker("弹窗主题", selection: $settings.reviewThemeRaw) {
 ## 8. Clarifications
 
 ### Q1: 窄屏宽度数学冲突（D2）
-**A**: `visibleW < 1200pt` 时 `maxW = visibleW×0.4 < minW=480`，区间 `[480, maxW]` 非法。落地采用 `maxW = max(480, visibleW×0.4)`：常规屏遵守 40% 相对上限，极窄屏以 480pt 最小可用宽兜底（此时宽度会超过屏 40%）。判定为实现层合理降级（Codex 交叉评审同判为 (a) 实现层决定，非改用户硬约束），已在 spec 补非规范性备注。若用户坚持「任何情况绝不超 40%」，改为窄屏允许低于 480 即可（一行改动），请一句话示下。
+**A**: round3 用户实测后要求「宽度再减少 30%」，因此宽度参数从 `minW=480 / maxW=visibleW×0.4` 等比收窄为 `minW=336 / maxW=visibleW×0.28`。当 `visibleW < 1200pt` 时 `maxW = visibleW×0.28 < minW=336`，区间 `[336, maxW]` 非法。落地采用 `maxW = max(336, visibleW×0.28)`：常规屏遵守 28% 相对上限，极窄屏以 336pt 最小可用宽兜底。若用户坚持「任何情况绝不超 28%」，改为窄屏允许低于 336 即可（一行改动）。
 
 ### 红线强制覆盖记录
 不适用（本 change 无红线覆盖）。
@@ -409,7 +409,7 @@ Picker("弹窗主题", selection: $settings.reviewThemeRaw) {
 
 - **协作方式**：需求规格摘要（无方案倾向）交 Codex，与本方案**并行独立**产出后交叉评审，**2 轮收敛**。
 - **共识（双方独立一致）**：四层拆分（窗口态/尺寸/主题/关闭）；窗口态与 `Phase` 解耦；PreferenceKey 测**内容自然尺寸而非 ScrollView viewport**；节流+阈值+单调增高+顶边锚定；`onClose` 当前不 cancel 是必须修的正确性 bug；Esc 必须移除 `.keyboardShortcut(.cancelAction)` 否则抢事件；移除 `.infinity`/`minHeight:360` 否则短内容不缩；resignKey+120ms 去抖过滤焦点抖动；三态胶囊由 Phase 派生；主题 UserDefaults 只存 id（Material 不可 Codable）+ 默认 + Picker + 环境注入；抽纯 sizing/状态机做单测。
-- **采纳的 Codex 意见**：① 四套主题视觉稿（Aurora Glass/Neon Noir/Solar Ink/Arctic Circuit）全部采纳并定默认为 Aurora Glass（用户授权 Codex 主导视觉）；② 窄屏宽度 `max(480, visibleW×0.4)` 兜底（D2）；③ 双 panel 需补的坑清单（level/space 同步、焦点恢复补 NSApp.activate、锚点反推、关闭幂等、capsule 也挂 delegate）；④ `windowShouldClose` 返回 false 汇聚统一关闭。
+- **采纳的 Codex 意见**：① 四套主题视觉稿（Aurora Glass/Neon Noir/Solar Ink/Arctic Circuit）全部采纳并定默认为 Aurora Glass（用户授权 Codex 主导视觉）；② 窄屏宽度 `max(336, visibleW×0.28)` 兜底（D2，round3 收窄 30% 后同步更新）；③ 双 panel 需补的坑清单（level/space 同步、焦点恢复补 NSApp.activate、锚点反推、关闭幂等、capsule 也挂 delegate）；④ `windowShouldClose` 返回 false 汇聚统一关闭。
 - **分歧与收敛**：唯一分歧「折叠实现」——本方案主张双 panel、Codex 初版主张同窗切 styleMask 变形；Round 2 交叉评审后 **Codex 改判认同双 panel**（理由：运行时切 styleMask 是 AppKit 最脆处、收益仅连续动画不值得；orderOut 不销毁使局部 @State 同样保活，削弱其原论据）。**无剩余分歧**。
 - **评审轮数**：2 轮收敛，无高级别分歧，无需回退。
 
