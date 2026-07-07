@@ -35,6 +35,7 @@ enum Prompt {
           - category ∈ grammar|spelling|word_choice|naturalness|tone|punctuation
           - severity ∈ error|improvement|optional
         - alternative: string（可选，更地道的整体改写，明确是非最小改动版；无则省略或空字符串）
+        - alternative_reason_zh: string（可选，一句中文说明"为什么这个更地道说法更好/改动点在哪"；仅当给了 alternative 时填，否则空）
         不要输出 JSON 以外的任何文字。
 
         为优化流式预览体验，请在 JSON 中【尽量优先输出 corrected 字段】（其余字段随后给出）。这只影响字段先后顺序、不改变上述任何正确性要求。
@@ -81,6 +82,7 @@ enum Prompt {
                     ],
                 ],
                 "alternative": ["type": "string"],
+                "alternative_reason_zh": ["type": "string"],
             ],
             "required": ["has_issues", "original", "corrected", "summary_zh", "issues"],
         ],

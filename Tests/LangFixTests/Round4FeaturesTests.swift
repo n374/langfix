@@ -97,9 +97,9 @@ final class Round4FeaturesTests: XCTestCase {
     // MARK: helpers
 
     private static func sampleResult(translation: String = "", issues: [Issue] = []) -> ReviewResult {
-        ReviewResult(hasIssues: !issues.isEmpty, original: "orig", corrected: "corrected",
+        ReviewResult(hasIssues: !issues.isEmpty, original: "orig text", corrected: "corrected text",
                      translationZh: translation, summaryZh: "总评", issues: issues,
-                     alternative: "a more idiomatic rewrite")
+                     alternative: "a more idiomatic rewrite", alternativeReasonZh: "这样更符合母语表达习惯")
     }
 
     private static func sampleIssue() -> Issue {

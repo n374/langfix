@@ -287,21 +287,32 @@ private struct PreviewBody: View {
     }
 }
 
-/// 中文直译行：小字、带「译」前缀，帮助中文母语用户核对修正后含义。
-private struct TranslationLine: View {
+/// 小提示行：左侧小图标 + 右侧小字说明（可复用）。
+private struct HintLine: View {
     let text: String
+    let systemImage: String
+    let tint: Color
     let theme: ReviewTheme
     var body: some View {
         HStack(alignment: .top, spacing: 5) {
-            Image(systemName: "character.book.closed")
+            Image(systemName: systemImage)
                 .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(theme.accent)
+                .foregroundColor(tint)
             Text(text)
                 .font(.caption)
                 .foregroundColor(theme.secondaryText)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+}
+
+/// 中文直译行：小字、带「书」图标，帮助中文母语用户核对修正后含义。
+private struct TranslationLine: View {
+    let text: String
+    let theme: ReviewTheme
+    var body: some View {
+        HintLine(text: text, systemImage: "character.book.closed", tint: theme.accent, theme: theme)
     }
 }
 
@@ -354,7 +365,9 @@ private struct ResultView: View {
                     diffBlock
                 }
                 if !result.issues.isEmpty { issuesBlock }
-                if let alt = result.alternative, !alt.trimmed.isEmpty { alternativeBlock(alt) }
+                if let alt = result.alternative, !alt.trimmed.isEmpty {
+                    alternativeBlock(alt, reason: result.alternativeReasonZh)
+                }
             }
             .padding(14)
             Divider()
@@ -411,12 +424,13 @@ private struct ResultView: View {
     private var diffBlock: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("改动对照").font(.caption).foregroundColor(theme.secondaryText)
-            ThemedCard(theme: theme) { diffText }
+            ThemedCard(theme: theme) { styledDiff(segs) }
         }
     }
 
-    private var diffText: Text {
-        segs.reduce(Text("")) { acc, seg in
+    /// 词级 diff 着色（删除红删除线 / 新增绿高亮），可复用给「修正结果」与「更地道说法」两处对照。
+    private func styledDiff(_ segments: [DiffEngine.Seg]) -> Text {
+        segments.reduce(Text("")) { acc, seg in
             switch seg {
             case .same(let s): return acc + Text(s).foregroundColor(theme.primaryText)
             case .delete(let s): return acc + Text(s).foregroundColor(theme.error).strikethrough()
@@ -434,16 +448,29 @@ private struct ResultView: View {
         }
     }
 
-    private func alternativeBlock(_ alt: String) -> some View {
-        DisclosureGroup("更地道的整体说法（非最小改动）") {
-            Text(alt)
-                .textSelection(.enabled)
-                .foregroundColor(theme.primaryText)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, 4)
+    /// 「更地道的整体说法」：round6 需求1/2 —— 不再折叠（DisclosureGroup 会被 Tab 焦点框选中致样式问题），
+    /// 改为默认展开的普通区块；并像「修正结果」一样给出**改动对照 diff**（相对原始输入，标出地道版改了哪）
+    /// 与一句中文说明，让用户直观看出该怎么改得更地道。
+    private func alternativeBlock(_ alt: String, reason: String) -> some View {
+        // diff 基准取原始 input：与上方「改动对照」同一基线（都相对你写的原文），两级修改可直接对比。
+        let altSegs = DiffEngine.segments(input, alt)
+        let hasDiff = !altSegs.allSatisfy { if case .same = $0 { return true } else { return false } }
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("更地道的整体说法（非最小改动）").font(.caption).foregroundColor(theme.secondaryText)
+            ThemedCard(theme: theme) {
+                Text(alt)
+                    .textSelection(.enabled)
+                    .foregroundColor(theme.primaryText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if hasDiff {
+                Text("地道版改动对照（相对原文）").font(.caption2).foregroundColor(theme.secondaryText)
+                ThemedCard(theme: theme) { styledDiff(altSegs) }
+            }
+            if !reason.trimmed.isEmpty {
+                HintLine(text: reason, systemImage: "sparkles", tint: theme.accent, theme: theme)
+            }
         }
-        .font(.caption)
-        .foregroundColor(theme.secondaryText)
     }
 
     private var footer: some View {

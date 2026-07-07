@@ -87,6 +87,8 @@ struct ReviewResult: Codable, Sendable {
     var summaryZh: String
     var issues: [Issue]
     var alternative: String?
+    /// alternative（更地道整体说法）的一句中文说明：为什么这样更地道。模型可能不返回，缺省空串。
+    var alternativeReasonZh: String
 
     /// 应用侧标记：护栏判定两轮都超阈值，提示用户改动较大（不参与 JSON 编解码）。
     var overEdited: Bool = false
@@ -99,10 +101,12 @@ struct ReviewResult: Codable, Sendable {
         case summaryZh = "summary_zh"
         case issues
         case alternative
+        case alternativeReasonZh = "alternative_reason_zh"
     }
 
     init(hasIssues: Bool, original: String, corrected: String,
-         translationZh: String = "", summaryZh: String, issues: [Issue], alternative: String? = nil) {
+         translationZh: String = "", summaryZh: String, issues: [Issue],
+         alternative: String? = nil, alternativeReasonZh: String = "") {
         self.hasIssues = hasIssues
         self.original = original
         self.corrected = corrected
@@ -110,6 +114,7 @@ struct ReviewResult: Codable, Sendable {
         self.summaryZh = summaryZh
         self.issues = issues
         self.alternative = alternative
+        self.alternativeReasonZh = alternativeReasonZh
     }
 
     init(from decoder: Decoder) throws {
@@ -121,6 +126,7 @@ struct ReviewResult: Codable, Sendable {
         self.summaryZh = (try? c.decode(String.self, forKey: .summaryZh)) ?? ""
         self.issues = (try? c.decode([Issue].self, forKey: .issues)) ?? []
         self.alternative = try? c.decodeIfPresent(String.self, forKey: .alternative)
+        self.alternativeReasonZh = (try? c.decode(String.self, forKey: .alternativeReasonZh)) ?? ""
     }
 
     /// 纯文本/解析失败时的兜底结果：以本地输入为 corrected（无翻译）。
