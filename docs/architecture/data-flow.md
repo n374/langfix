@@ -94,6 +94,7 @@ sequenceDiagram
   "has_issues": true,                  // 是否存在需修改项
   "original": "...",                   // 回显（用于 diff 与校验）
   "corrected": "最小改动修正版",         // 主结果
+  "translation_zh": "corrected 的简体中文直译",  // round4：帮助中文母语用户核对修正后含义；可缺省（缺则空串）
   "summary_zh": "一句话总评（中文）",
   "issues": [
     {

@@ -6,9 +6,13 @@
 
 ## 1. 窗体
 
-- `NSPanel`（floating level，`.nonactivatingPanel` 可选），出现在**鼠标附近或屏幕中心**，非全屏。
+- `NSPanel`（floating level，`.nonactivatingPanel` 可选），非全屏。
+- **跟随鼠标定位（round4）**：初始位置由 `ReviewWindowController.placeInitialFrame` 纯函数计算——
+  水平优先落在鼠标右侧并留 `followMouseGap=24pt` 呼吸间距，右侧空间不足则翻到鼠标左侧；
+  竖直以「窗口最大化时上下居中、再稍偏上」为目标锚定顶边（顶边距屏顶 = 屏高 × `verticalTopMarginRatio=0.12`）。
+  最终统一经 `clampToVisibleFrame` 兜回鼠标所在屏 `visibleFrame`，多屏/贴边不越界。
 - 出现即可见（loading 态先行），AI 返回后填充内容。
-- 关闭：`Esc` / 点击窗外 / 关闭按钮。
+- 关闭：`Esc`（折叠为胶囊，非关闭）/ 底部「关闭」按钮 / 标题栏关闭。
 - 性能目标：触发到出窗 < 300ms（NFR-1），不等待 AI。
 
 ## 2. 布局（从上到下）
@@ -68,15 +72,24 @@
 > **不提供**「替换原选区」（V1 红线 Constraint-4）。
 > 「复制解释 / 重新检查 / 语气切换」为便利项，**不纳入 V1 强制验收**（见 [spec §2.1](../../specs/grammar-review/spec.md)）；V1 验收只要求「复制修正结果」可靠。
 
+## 5b. 底部操作栏与按钮（round4）
+
+弹窗底部为统一操作栏 `ReviewActionBar`：**左侧固定「隐藏」，右侧承载各态主操作**，一律用主题化胶囊芯片 `ActionChip`（圆角描边 + 毛玻璃卡片填充 + hover 微亮，替代原生按钮，克制不抢戏）。
+
+- **「停止/关闭」合并为同一按钮位**：流式/加载态显示「停止」（`stop.fill`，warning 色），完成/停止/错误态显示「关闭」（`xmark`，次要色）。
+- **「停止」语义（`onStop`）**：仅停止底层请求、**保留已生成内容、窗口不关闭**（冻结为 `.stopped`）；加载态尚无内容则退化为直接关闭。决策见纯函数 `AppCoordinator.stopOutcome(for:)`。
+- **「隐藏」按钮（`onHide`）**：把窗口折叠为胶囊入口（`.hideIcon` 事件），取代旧标题栏 `minus.circle` 图标。
+
 ## 6. 状态
 
-对应 `ReviewState.Phase`：`loading / streaming(StreamingPreview) / result(ReviewResult) / error`。
+对应 `ReviewState.Phase`：`loading / streaming(StreamingPreview) / stopped(StreamingPreview) / result(ReviewResult) / error`。
 
 | 状态 | 展示 |
 |---|---|
-| loading | 进度指示 + 可取消（R5） |
-| streaming（校对预览中） | 「校对预览中…/定稿中…」徽标 + corrected 逐字预览（打字机）+ 已闭合 issue 卡片；**无词级 diff、复制禁用、可取消**。`StreamingPreview` 为预览专用值（独立于 `ReviewResult`），由 `PartialReviewParser` 增量产出，**永不参与正确性**（见 [ai-client.md §3.5](./ai-client.md)）。preview 回调 `@MainActor` 顺序 `await`，带 generation/取消屏障 + 单调前缀守卫，杜绝旧任务污染/取消后更新已关窗 |
-| 成功·有问题 | 完整布局（去预览标记、终态才出词级 diff） |
+| loading | 进度指示 + 底部「隐藏」「停止」（R5） |
+| streaming（校对预览中） | 「校对预览中…/定稿中…」徽标 + corrected 逐字预览（打字机）+ **中文直译行（round4）** + 已闭合 issue 卡片；**无词级 diff、复制禁用**；底部「隐藏」「停止」（停止=保留已有内容）。`StreamingPreview` 为预览专用值（独立于 `ReviewResult`），由 `PartialReviewParser` 增量产出，**永不参与正确性**（见 [ai-client.md §3.5](./ai-client.md)）。preview 回调 `@MainActor` 顺序 `await`，带 generation/取消屏障 + 单调前缀守卫，杜绝旧任务污染/取消后更新已关窗 |
+| stopped（已停止·部分结果，round4） | 用户主动「停止」后冻结的部分内容：`stop.circle`「已停止（部分结果）」徽标 + 与 streaming 同布局，主操作为「关闭」；复制仍禁用（部分结果非最终真相） |
+| 成功·有问题 | 完整布局（去预览标记、终态才出词级 diff）；corrected 卡片下展示**中文直译**（`translation_zh`，round4） |
 | 成功·无问题 | 状态条「✓ 无明显错误」，corrected==original，可显示一条 optional（R11） |
 | overEdited | 顶部 ⚠️ banner「AI 改动较大，请核对」 |
 | 错误 | 错误文案 + 重试/设置入口（R7） |

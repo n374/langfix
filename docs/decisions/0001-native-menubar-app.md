@@ -42,8 +42,20 @@
 - 落地：建 Xcode 工程，菜单栏 + NSPanel + Service provider 骨架。
 - 验收：对应 spec R1（触发即出窗）与 NFR-1（<300ms）。
 
+### 6.1 顶层主菜单（round4 补充）
+
+`LSUIElement` 应用默认**无主菜单栏**。为满足「顶层状态栏菜单」与「Cmd+, 打开设置」（macOS 通用约定），
+在 `applicationDidFinishLaunching` 显式 `NSApp.mainMenu = AppMenu.build(target:)` 装一套主菜单（`AppMenu` 为纯构造、可单测）：
+
+- **App 菜单**：关于 / 设置…（`Cmd+,`）/ 检查剪贴板 / 隐藏（`Cmd+H`）/ 退出（`Cmd+Q`）。
+- **Edit 菜单**：撤销·重做·剪切·复制·粘贴·全选（走 first responder，使弹窗与设置文本框支持标准编辑快捷键）。
+- **Window 菜单**：最小化（`Cmd+M`）/ 关闭（`Cmd+W`）。
+
+App 处于前台且有 key window 时菜单可见；`Cmd+,` 等 key equivalent 经 responder 链生效。右上角 `MenuBarExtra` 状态栏图标保留不变。
+
 ## 7. 修订历史
 
 | 日期 | 状态变更 | 摘要 |
 |---|---|---|
 | 2026-06-29 | → Accepted | 初始决策 |
+| 2026-07-07 | 补充 | round4：LSUIElement 应用补装顶层主菜单（App/Edit/Window）+ Cmd+, 打开设置 |
