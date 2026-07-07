@@ -287,14 +287,23 @@ final class ReviewWindowStyleTests: XCTestCase {
     private func measureSubMaxPeak(controller: ReviewWindowController,
                                    state: ReviewState,
                                    maxHeight: CGFloat) -> ReviewWindowController.MeasurementSnapshot {
+        // 逐行（stride by 1，从 1 行起）细粒度搜索，保证在任意屏幕尺寸/视图开销下都能落入
+        // (0.55·maxH, 0.85·maxH) 目标带——粗粒度（by 2）在小屏（如 CI runner，maxH≈477）上会
+        // 因单步跨度大而跳过整个带，导致找不到 sub-max peak。带宽约 0.3·maxH ≫ 单行高度，逐行必命中。
         var last = controller.measurementSnapshotForTesting()
-        for lines in stride(from: 8, through: 70, by: 2) {
+        var best: ReviewWindowController.MeasurementSnapshot?
+        for lines in stride(from: 1, through: 90, by: 1) {
             state.phase = .streaming(StreamingPreview(corrected: Self.streamingText(lines: lines)))
             let snapshot = controller.measureAndApplyForTesting()
             last = snapshot
             if snapshot.natural.height > maxHeight * 0.55 && snapshot.natural.height < maxHeight * 0.85 {
                 return snapshot
             }
+            // 兜底：记录最后一个仍严格低于 maxH 的快照，避免搜索未命中带时返回越界（clamp 到 maxH）的快照。
+            if snapshot.natural.height < maxHeight { best = snapshot }
+        }
+        if let best {
+            return best
         }
         XCTFail("could not produce a deterministic sub-max peak; last measured height \(last.natural.height), max \(maxHeight)")
         return last
