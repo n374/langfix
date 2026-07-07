@@ -283,6 +283,47 @@ final class ReviewWindowStyleTests: XCTestCase {
         XCTAssertEqual(selected, secondary)
     }
 
+    // MARK: round5 —— 多屏定位：驱动「真实初始定位路径」的选屏（非只测注入 vf 的 placeInitialFrame）
+
+    /// **round5 回归**：鼠标在副屏时，初始定位组合函数（生产 `positionExpandedPanelForInitialDisplay`
+    /// 调用的同一个 `initialFrame`：选屏 → 定位 → clamp）必须让窗口落在副屏，绝不被拉回主屏。
+    /// 该断言对旧实现（初始定位用 `expandedPanel.screen`=主屏当 vf）会 fail——正是前三次绿却没修好的漏洞点。
+    @MainActor
+    func testInitialFrameLandsOnMouseScreenNotMainOnMultiDisplay() {
+        // 副屏在主屏右侧、原点带负 y（真实多屏常见布局，能暴露坐标系/clamp 问题）。
+        let main = ReviewWindowController.ScreenFrame(
+            frame: NSRect(x: 0, y: 0, width: 1440, height: 900),
+            visibleFrame: NSRect(x: 0, y: 0, width: 1440, height: 875))
+        let secondary = ReviewWindowController.ScreenFrame(
+            frame: NSRect(x: 1440, y: -180, width: 1920, height: 1080),
+            visibleFrame: NSRect(x: 1440, y: -180, width: 1920, height: 1055))
+        let mouse = NSPoint(x: 1440 + 900, y: -180 + 500)   // 鼠标在副屏内
+        let frame = ReviewWindowController.initialFrame(
+            windowSize: CGSize(width: 336, height: 200), mouseLocation: mouse,
+            screens: [main, secondary], fallbackVisibleFrame: main.visibleFrame,
+            gap: 24, topMarginRatio: 0.12)
+        XCTAssertTrue(secondary.visibleFrame.contains(frame), "窗口应落在鼠标所在的副屏 visibleFrame 内")
+        XCTAssertFalse(frame.intersects(main.frame), "窗口不得出现在主屏（旧 bug：被 clamp 回主屏）")
+    }
+
+    /// 选屏返回的是命中屏的 visibleFrame（非 frame），且能命中负原点/偏移副屏。
+    @MainActor
+    func testSelectVisibleFrameReturnsHitScreenVisibleFrame() {
+        let main = ReviewWindowController.ScreenFrame(
+            frame: NSRect(x: 0, y: 0, width: 1440, height: 900),
+            visibleFrame: NSRect(x: 0, y: 25, width: 1440, height: 875))
+        let secondary = ReviewWindowController.ScreenFrame(
+            frame: NSRect(x: -1920, y: -100, width: 1920, height: 1080),
+            visibleFrame: NSRect(x: -1920, y: -100, width: 1920, height: 1055))
+        let onSecondary = ReviewWindowController.selectVisibleFrame(
+            mouseLocation: NSPoint(x: -1000, y: 200), screens: [main, secondary], fallback: main.visibleFrame)
+        XCTAssertEqual(onSecondary, secondary.visibleFrame, "命中副屏 → 返回副屏 visibleFrame")
+        // 鼠标不在任何屏 → fallback。
+        let off = ReviewWindowController.selectVisibleFrame(
+            mouseLocation: NSPoint(x: 99_999, y: 99_999), screens: [main, secondary], fallback: main.visibleFrame)
+        XCTAssertEqual(off, main.visibleFrame, "命中不了任何屏 → fallback")
+    }
+
     @MainActor
     private func measureSubMaxPeak(controller: ReviewWindowController,
                                    state: ReviewState,

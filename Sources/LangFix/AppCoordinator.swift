@@ -442,14 +442,50 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         expandedPanel.setFrame(frame, display: true)
     }
 
+    /// 一块屏的 frame + visibleFrame 快照（AppKit 解耦，便于把「选屏」逻辑单测到真实路径）。
+    struct ScreenFrame: Equatable, Sendable { var frame: NSRect; var visibleFrame: NSRect }
+
+    /// **round5 修复多屏定位**：初始定位必须以**鼠标所在屏**为权威屏。
+    ///
+    /// 旧 bug（第 3 次复发的真根因）：这里曾用 `expandedPanel.screen ?? preferredScreen ?? …`——
+    /// 窗口首次上屏前 panel 的 frame 仍在主屏，`expandedPanel.screen` 非 nil 即主屏，直接盖掉了
+    /// `preferredScreen`（鼠标屏），于是拿主屏 vf 去 clamp，把窗口永远拉回主屏。
+    /// 而此前单测只测「注入 vf 的 `placeInitialFrame`」，从不覆盖「运行时到底选了哪块屏」，故测试绿却没修好。
+    ///
+    /// 现在：直接把 `NSScreen.screens` 快照喂给纯函数 `initialFrame`，由它按鼠标选屏 → 定位 → clamp，
+    /// **完全不看 `expandedPanel.screen`**；上屏后的 resize 路径仍可用 `expandedPanel.screen`（那时已在正确屏）。
     private func positionExpandedPanelForInitialDisplay() {
-        let vf = (expandedPanel.screen ?? preferredScreen ?? NSScreen.main)?.visibleFrame ?? .zero
-        let frame = Self.placeInitialFrame(windowSize: expandedPanel.frame.size,
-                                           mouseLocation: NSEvent.mouseLocation,
-                                           visibleFrame: vf,
-                                           gap: Self.followMouseGap,
-                                           topMarginRatio: Self.verticalTopMarginRatio)
+        let screens = NSScreen.screens.map { ScreenFrame(frame: $0.frame, visibleFrame: $0.visibleFrame) }
+        let fallback = (preferredScreen ?? NSScreen.main)?.visibleFrame ?? .zero
+        let frame = Self.initialFrame(windowSize: expandedPanel.frame.size,
+                                      mouseLocation: NSEvent.mouseLocation,
+                                      screens: screens,
+                                      fallbackVisibleFrame: fallback,
+                                      gap: Self.followMouseGap,
+                                      topMarginRatio: Self.verticalTopMarginRatio)
         expandedPanel.setFrame(frame, display: false)
+    }
+
+    /// 按鼠标位置选屏 → 返回该屏 visibleFrame（命中不了任何屏时用 fallback）。
+    /// 生产选屏与测试选屏共用此实现，杜绝「测一份、生产走另一份」。
+    static func selectVisibleFrame(mouseLocation: NSPoint,
+                                   screens: [ScreenFrame],
+                                   fallback: NSRect) -> NSRect {
+        screens.first(where: { $0.frame.contains(mouseLocation) })?.visibleFrame ?? fallback
+    }
+
+    /// **组合**：按鼠标选屏 → 在该屏 visibleFrame 内跟随鼠标定位 → clamp。生产与测试走同一条路径。
+    /// 这是 `positionExpandedPanelForInitialDisplay` 的完整可测替身：唯一非注入的只剩
+    /// `NSScreen.screens` / `NSEvent.mouseLocation` 两个薄适配，选屏+定位的真实逻辑全在此函数。
+    static func initialFrame(windowSize: CGSize,
+                             mouseLocation: NSPoint,
+                             screens: [ScreenFrame],
+                             fallbackVisibleFrame: NSRect,
+                             gap: CGFloat,
+                             topMarginRatio: CGFloat) -> NSRect {
+        let vf = selectVisibleFrame(mouseLocation: mouseLocation, screens: screens, fallback: fallbackVisibleFrame)
+        return placeInitialFrame(windowSize: windowSize, mouseLocation: mouseLocation,
+                                 visibleFrame: vf, gap: gap, topMarginRatio: topMarginRatio)
     }
 
     /// 跟随鼠标定位的纯函数（与 AppKit 解耦、可单测）：
@@ -507,10 +543,14 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         (expandedVisualEffect.material, expandedVisualEffect.blendingMode, expandedVisualEffect.state)
     }
 
+    /// 旧兼容签名（frames-only）：委托到统一的 `selectVisibleFrame`（frame 视作 visibleFrame），
+    /// 不再是独立实现——保证选屏逻辑只有一份。
     static func visibleFrameForInitialDisplayForTesting(mouseLocation: NSPoint,
                                                         screens: [NSRect],
                                                         fallback: NSRect) -> NSRect {
-        screens.first(where: { $0.contains(mouseLocation) }) ?? fallback
+        selectVisibleFrame(mouseLocation: mouseLocation,
+                           screens: screens.map { ScreenFrame(frame: $0, visibleFrame: $0) },
+                           fallback: fallback)
     }
 
     static func initialFrameForTesting(windowFrame: NSRect,
