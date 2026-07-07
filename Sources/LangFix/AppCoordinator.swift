@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// 全局编排：接 Service 输入 → 校验 → 弹窗 → 跑 ReviewEngine → 更新状态；并管理设置窗口。
@@ -138,10 +139,14 @@ final class AppCoordinator {
     }
 
     func openAbout() {
+        let info = Bundle.main.infoDictionary
+        let version = (info?["CFBundleShortVersionString"] as? String) ?? "0.1.0"
+        let build = (info?["CFBundleVersion"] as? String) ?? "1"
+        let sha = (info?["LangFixBuildSHA"] as? String) ?? "dev"
         NSApp.activate(ignoringOtherApps: true)
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "LangFix",
-            .applicationVersion: "0.1.0",
+            .applicationVersion: "\(version) (\(build), \(sha))",
             NSApplication.AboutPanelOptionKey(rawValue: "Copyright"): "划词写作纠错 · PopClip 触发 · 最小改动 + 中文解释",
         ])
     }
@@ -184,10 +189,13 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
     private let expandedPanel: NSPanel
     private let capsulePanel: NSPanel
     private var expandedHosting: NSHostingView<ReviewView>!
+    private let expandedVisualEffect = NSVisualEffectView()
     private var measurementHosting: PassthroughHostingView<ReviewMeasurementView>!
     private let expandedContainer = NSView()
     private let capsuleContainer = NSView()
     private var escMonitor: Any?
+    private var stateChangeCancellable: AnyCancellable?
+    private var preferredScreen: NSScreen?
 
     private let sizing = ReviewWindowSizing()
     private var machineState: ReviewWindowMachineState
@@ -195,7 +203,6 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
     private var lastSize: CGSize = CGSize(width: ReviewWindowSizing.minWidth, height: 200)
     private var latestNaturalSize: CGSize = CGSize(width: ReviewWindowSizing.minWidth, height: 200)
     private var latestIsOverflowing = false
-    private var resizeApplyScheduled = false
     private var measurementConstraints: [NSLayoutConstraint] = []
 
     /// Coordinator 注入：关闭按钮/标题栏关闭 → 汇聚到唯一 cancel 路径（会回调本控制器 close()）。
@@ -216,6 +223,9 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
             backing: .buffered, defer: false
         )
         super.init()
+        stateChangeCancellable = state.objectWillChange.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.refreshMeasurement() }
+        }
         configurePanels()
     }
 
@@ -226,6 +236,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         expandedPanel.backgroundColor = .clear
         expandedPanel.isOpaque = false
         expandedPanel.hasShadow = true
+        expandedPanel.contentMinSize = CGSize(width: ReviewWindowSizing.minWidth, height: sizing.minHeight)
         let hosting = NSHostingView(rootView: makeReviewView(maxContentSize: defaultMaxContentSize))
         expandedHosting = hosting
         configureExpandedContainer()
@@ -268,10 +279,20 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
     }
 
     private func configureExpandedContainer() {
+        expandedVisualEffect.translatesAutoresizingMaskIntoConstraints = false
+        expandedVisualEffect.blendingMode = .behindWindow
+        expandedVisualEffect.material = .hudWindow
+        expandedVisualEffect.state = .active
+        expandedContainer.addSubview(expandedVisualEffect)
         expandedHosting.translatesAutoresizingMaskIntoConstraints = false
+        expandedHosting.layer?.backgroundColor = .clear
         expandedContainer.addSubview(expandedHosting)
         expandedPanel.contentView = expandedContainer
         NSLayoutConstraint.activate([
+            expandedVisualEffect.leadingAnchor.constraint(equalTo: expandedContainer.leadingAnchor),
+            expandedVisualEffect.trailingAnchor.constraint(equalTo: expandedContainer.trailingAnchor),
+            expandedVisualEffect.topAnchor.constraint(equalTo: expandedContainer.topAnchor),
+            expandedVisualEffect.bottomAnchor.constraint(equalTo: expandedContainer.bottomAnchor),
             expandedHosting.leadingAnchor.constraint(equalTo: expandedContainer.leadingAnchor),
             expandedHosting.trailingAnchor.constraint(equalTo: expandedContainer.trailingAnchor),
             expandedHosting.topAnchor.constraint(equalTo: expandedContainer.topAnchor),
@@ -352,11 +373,12 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
 
     /// 上屏前的兜底上限（真实上限在上屏后按 panel.screen 重算）。
     private var defaultMaxContentSize: CGSize {
-        let vf = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let vf = (preferredScreen ?? NSScreen.main)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         return sizing.limits(visibleFrame: vf)
     }
 
     func showCentered() {
+        preferredScreen = Self.screenContainingMouse() ?? NSScreen.main
         positionExpandedPanelForInitialDisplay()
         NSApp.activate(ignoringOtherApps: true)
         expandedPanel.makeKeyAndOrderFront(nil)
@@ -375,7 +397,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
     }
 
     private func currentMaxContentSize() -> CGSize {
-        let vf = (expandedPanel.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        let vf = (expandedPanel.screen ?? preferredScreen ?? NSScreen.main)?.visibleFrame ?? .zero
         return sizing.limits(visibleFrame: vf)
     }
 
@@ -388,31 +410,24 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
     private func updateNaturalSize(_ natural: CGSize) {
         guard natural.width > 0, natural.height > 0 else { return }
         latestNaturalSize = natural
-        let vf = (expandedPanel.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        let vf = (expandedPanel.screen ?? preferredScreen ?? NSScreen.main)?.visibleFrame ?? .zero
         let overflowing = sizing.isOverflowing(natural: natural, visibleFrame: vf)
         if overflowing != latestIsOverflowing {
             latestIsOverflowing = overflowing
             refreshDisplayedView()
         }
-        scheduleApplyLatestSize()
-    }
-
-    private func scheduleApplyLatestSize() {
-        guard machineState.presentation == .expanded else { return }
-        guard !resizeApplyScheduled else { return }
-        resizeApplyScheduled = true
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.resizeApplyScheduled = false
-            self.applyResize(self.latestNaturalSize, force: false)
-        }
+        applyResize(latestNaturalSize, force: false)
     }
 
     private func applyResize(_ natural: CGSize, force: Bool) {
         guard machineState.presentation == .expanded else { return }
-        let vf = (expandedPanel.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        let vf = (expandedPanel.screen ?? preferredScreen ?? NSScreen.main)?.visibleFrame ?? .zero
         let target = sizing.target(natural: natural, visibleFrame: vf)
-        guard force || abs(target.width - lastSize.width) > 0.5 || abs(target.height - lastSize.height) > 0.5 else { return }
+        let currentSize = expandedPanel.contentView?.bounds.size ?? expandedPanel.contentRect(forFrameRect: expandedPanel.frame).size
+        guard force || abs(target.width - currentSize.width) > 0.5 || abs(target.height - currentSize.height) > 0.5 else {
+            lastSize = target
+            return
+        }
         lastSize = target
         var frame = expandedPanel.frame
         let top = frame.maxY
@@ -423,7 +438,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
     }
 
     private func positionExpandedPanelForInitialDisplay() {
-        let vf = (expandedPanel.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        let vf = (expandedPanel.screen ?? preferredScreen ?? NSScreen.main)?.visibleFrame ?? .zero
         var frame = expandedPanel.frame
         positionInitialFrame(&frame, visibleFrame: vf)
         expandedPanel.setFrame(frame, display: false)
@@ -455,6 +470,18 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         (expandedPanel.isOpaque, expandedPanel.backgroundColor)
     }
 
+    func expandedVisualEffectForTesting() -> (material: NSVisualEffectView.Material,
+                                              blendingMode: NSVisualEffectView.BlendingMode,
+                                              state: NSVisualEffectView.State) {
+        (expandedVisualEffect.material, expandedVisualEffect.blendingMode, expandedVisualEffect.state)
+    }
+
+    static func visibleFrameForInitialDisplayForTesting(mouseLocation: NSPoint,
+                                                        screens: [NSRect],
+                                                        fallback: NSRect) -> NSRect {
+        screens.first(where: { $0.contains(mouseLocation) }) ?? fallback
+    }
+
     static func initialFrameForTesting(windowFrame: NSRect, visibleFrame: NSRect) -> NSRect {
         var frame = windowFrame
         guard visibleFrame != .zero else { return frame }
@@ -472,6 +499,11 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         if frame.minY < vf.minY { frame.origin.y = vf.minY }
     }
 
+    private static func screenContainingMouse() -> NSScreen? {
+        let location = NSEvent.mouseLocation
+        return NSScreen.screens.first { $0.frame.contains(location) }
+    }
+
     struct MeasurementSnapshot: Equatable {
         var natural: CGSize
         var appliedContent: CGSize
@@ -487,7 +519,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
     }
 
     func measurementSnapshotForTesting() -> MeasurementSnapshot {
-        let contentSize = expandedPanel.contentRect(forFrameRect: expandedPanel.frame).size
+        let contentSize = expandedPanel.contentView?.bounds.size ?? expandedPanel.contentRect(forFrameRect: expandedPanel.frame).size
         return MeasurementSnapshot(
             natural: latestNaturalSize,
             appliedContent: contentSize,
@@ -570,7 +602,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
     /// 真正的销毁：移除 monitor、两 panel orderOut+close、清 delegate。幂等。
     func close() {
         if let m = escMonitor { NSEvent.removeMonitor(m); escMonitor = nil }
-        resizeApplyScheduled = false
+        stateChangeCancellable = nil
         machineState.presentation = .closed
         for p in [expandedPanel, capsulePanel] {
             p.delegate = nil

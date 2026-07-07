@@ -27,12 +27,13 @@ struct ReviewView: View {
                 ScrollView {
                     content
                 }
+                .frame(maxHeight: maxContentSize.height, alignment: .topLeading)
             } else {
                 content
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .frame(maxWidth: maxContentSize.width, maxHeight: maxContentSize.height, alignment: .topLeading)
+        .frame(maxWidth: maxContentSize.width, alignment: .topLeading)
         .background(theme.windowBackground)
         .animation(.easeOut(duration: theme.animationDuration), value: theme.id)
     }

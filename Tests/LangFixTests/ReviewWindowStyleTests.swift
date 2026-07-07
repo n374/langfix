@@ -46,6 +46,10 @@ final class ReviewWindowStyleTests: XCTestCase {
         let appearance = controller.expandedPanelAppearanceForTesting()
         XCTAssertFalse(appearance.isOpaque)
         XCTAssertEqual(appearance.backgroundColor, .clear)
+        let glass = controller.expandedVisualEffectForTesting()
+        XCTAssertEqual(glass.material, .hudWindow)
+        XCTAssertEqual(glass.blendingMode, .behindWindow)
+        XCTAssertEqual(glass.state, .active)
         controller.close()
     }
 
@@ -190,6 +194,42 @@ final class ReviewWindowStyleTests: XCTestCase {
     }
 
     @MainActor
+    func testStreamingStateChangesResizeThroughProductionRunLoopPath() {
+        _ = NSApplication.shared
+        let state = ReviewState()
+        state.phase = .loading
+        let controller = ReviewWindowController(state: state, behavior: .normal)
+        controller.showCentered()
+        defer { controller.close() }
+
+        settleMainRunLoop()
+        let loading = controller.measurementSnapshotForTesting()
+        XCTAssertLessThan(loading.appliedContent.height, loading.maxContent.height * 0.5)
+
+        state.phase = .streaming(StreamingPreview(corrected: "A concise correction."))
+        settleMainRunLoop()
+        let short = controller.measurementSnapshotForTesting()
+        XCTAssertLessThan(short.natural.height, short.maxContent.height * 0.5)
+        XCTAssertLessThan(short.appliedContent.height, short.maxContent.height * 0.5)
+        XCTAssertLessThanOrEqual(short.appliedContent.height - short.natural.height, 32)
+
+        state.phase = .streaming(StreamingPreview(corrected: Self.streamingText(lines: 120)))
+        settleMainRunLoop()
+        let long = controller.measurementSnapshotForTesting()
+        XCTAssertGreaterThan(long.natural.height, long.maxContent.height)
+        XCTAssertEqual(long.appliedContent.height, long.maxContent.height, accuracy: 2)
+        XCTAssertTrue(long.isOverflowing)
+
+        state.phase = .streaming(StreamingPreview(corrected: "A concise correction."))
+        settleMainRunLoop()
+        let backToShort = controller.measurementSnapshotForTesting()
+        XCTAssertLessThan(backToShort.natural.height, long.maxContent.height * 0.5)
+        XCTAssertLessThanOrEqual(backToShort.appliedContent.height - backToShort.natural.height, 32)
+        XCTAssertNotEqual(backToShort.appliedContent.height, long.appliedContent.height, accuracy: 2)
+        XCTAssertFalse(backToShort.isOverflowing)
+    }
+
+    @MainActor
     func testInitialFrameIsUpperRightBiasedAndInsideVisibleFrame() {
         let visibleFrame = NSRect(x: 120, y: 80, width: 1600, height: 1000)
         let windowFrame = NSRect(x: 0, y: 0, width: 420, height: 220)
@@ -203,6 +243,18 @@ final class ReviewWindowStyleTests: XCTestCase {
         XCTAssertGreaterThan(frame.origin.y, centeredOrigin.y)
         XCTAssertGreaterThan(frame.origin.x, centeredOrigin.x)
         XCTAssertTrue(visibleFrame.contains(frame))
+    }
+
+    @MainActor
+    func testInitialScreenSelectionUsesMouseScreenForSecondaryDisplay() {
+        let main = NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let secondary = NSRect(x: 1440, y: -120, width: 1920, height: 1080)
+        let selected = ReviewWindowController.visibleFrameForInitialDisplayForTesting(
+            mouseLocation: NSPoint(x: 2200, y: 200),
+            screens: [main, secondary],
+            fallback: main
+        )
+        XCTAssertEqual(selected, secondary)
     }
 
     @MainActor
@@ -226,5 +278,12 @@ final class ReviewWindowStyleTests: XCTestCase {
         (1...lines)
             .map { "Line \($0): This sentence keeps the streaming preview tall enough for measurement." }
             .joined(separator: "\n")
+    }
+
+    @MainActor
+    private func settleMainRunLoop(iterations: Int = 8) {
+        for _ in 0..<iterations {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+        }
     }
 }

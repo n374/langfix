@@ -69,12 +69,12 @@ enum ReviewThemeCatalog {
     static let auroraGlass = ReviewTheme(
         id: .auroraGlass, displayName: "Aurora Glass",
         material: .ultraThinMaterial,
-        backgroundTop: Color(hex: 0x07111F, opacity: 0.42),
-        backgroundBottom: Color(hex: 0x07111F, opacity: 0.72),
+        backgroundTop: Color(hex: 0x07111F, opacity: 0.18),
+        backgroundBottom: Color(hex: 0x07111F, opacity: 0.34),
         primaryText: Color(hex: 0xEAF6FF), secondaryText: Color(hex: 0x9FB4C7),
         accent: Color(hex: 0x7DD3FC), success: Color(hex: 0x34D399),
         warning: Color(hex: 0xFBBF24), error: Color(hex: 0xFB7185),
-        cardFill: Color(hex: 0x0B1220, opacity: 0.58), cardStroke: Color(hex: 0x7DD3FC, opacity: 0.22),
+        cardFill: Color(hex: 0x0B1220, opacity: 0.42), cardStroke: Color(hex: 0x7DD3FC, opacity: 0.22),
         glow: Color(hex: 0x7DD3FC), glowOpacity: 0.22,
         cornerRadius: 18, borderWidth: 1, animationDuration: 0.16)
 
