@@ -3,9 +3,10 @@
 
 - **Owner**: by 技术方案官 on behalf of wu.nerd
 - **Reviewers**: 编排官、wu.nerd
-- **创建日期**: 2026-07-03（Round 2 增补：2026-07-06）
-- **状态**: Round 1 已落地（PR #2 OPEN）；**Round 2 设计定稿**（本次，bug 修复 + 三模式交互改写，Codex 交叉评审 3 轮收敛）
-- **基于 proposal**: [proposal.md](./proposal.md)（Round 2 需求见 §9）
+- **创建日期**: 2026-07-03（Round 2 增补：2026-07-06；Round 3 增补：2026-07-07）
+- **状态**: Round 1/2 已落地（PR #2 OPEN）；**Round 3 设计定稿**（本次，高度 bug 根因反转——实测钉死单调锁 + 初始屏幕定位，Codex 对抗评审 3 轮收敛「通过」）
+- **基于 proposal**: [proposal.md](./proposal.md)（Round 2 见 §9，Round 3 见 §10）
+- **Round 3 章节**: 见 [§13 Round 3](#13-round-3高度-bug-根因反转实测钉死单调锁--初始屏幕定位)（本次新增，§1–§12 保留为历史基线）。
 - **关联 spec**: [specs/review-window/spec.md](./specs/review-window/spec.md)
 - **共享分支**: `feat/33-adaptive-window-ui`
 - **Constitution check**: 已读 [../../overview/constitution.md](../../overview/constitution.md)，**无冲突**（窗口行为模式与主题一样属非敏感偏好，走 UserDefaults 不进 Keychain，Constraint-1 只约束 API key；本 change（含 Round 2）不动流式解析/AI 调用/护栏/diff，不触 Constraint-2/3/4）。
@@ -727,3 +728,120 @@ Round 1 基础版（`sparkles` / `checkmark.seal.fill` / `exclamationmark.triang
 | 轮次 | 日期 | 变更 |
 |---|---|---|
 | Round 2 设计 | 2026-07-06 | Bug1 结构门控 + 测量/显示解耦 + runloop 合并；Bug2 常驻测量宿主 + 展开重算；三模式单一状态机（behavior×presentation+action）；层级随模式两 panel 两态；隐藏图标标题栏 accessory；设置三模式单选卡片；胶囊三态增强 + B 置顶暗示；模式切换下次开窗生效。Codex 主导 UI + 交叉评审 3 轮收敛。 |
+
+---
+
+## 13. Round 3（高度 bug 根因反转：实测钉死单调锁 + 初始屏幕定位）
+
+> **需求来源**：proposal [§10](./proposal.md)（用户第 3 次报同类高度 bug，要求「修到对抗评审通过为止」）+ spec `review-window` Round 3 H1/H2 硬验收。
+> **本轮性质特殊**：同一「窗口高度暴涨/卡在接近最大」bug 在 round2（`1a0c974`）、round2.5（`1ee16b5`）两次修复后仍复发。本轮**先用实测驱动真实路径钉死根因、再设计修复**，对抗式交叉评审是硬 gate（Codex 3 轮收敛，最终「通过」）。
+> **诚实记录（根因反转）**：需求/上游把根因定性为「测量 greedy-fill 把内容撑到 ≈maxH」。**本轮实测证伪了这一假设**——真实测量是正确的，真正被复现的根因是 `ReviewWindowSizing.monotonicTarget` 的**流式高度永久单调锁**。详见 §13.1。
+
+### 13.1 根因定位（实测驱动真实路径，非算术推断）
+
+**方法**：在 `swift test` 里加临时 probe seam 驱动**真实** `ReviewWindowController.showCentered()` / `refreshMeasurement()` / `applyResize()`（**不预塞自然高度**），打印生产测量出的 `latestNaturalSize` 与 `expandedPanel` 实际 content 尺寸。屏幕 `maxH=734.3`。
+
+**实测 ground truth**：
+
+| 场景 | 生产测得 natural.height | 实际 applied.height | 判读 |
+|---|---|---|---|
+| loading 初始 | 184 | 216 | 正常，非 maxH |
+| long streaming（长内容） | 600 | 600 | 随内容增，正确 |
+| **long 之后喂 short streaming** | **200（正确回落）** | **600（卡死）** | ← **bug 复现** |
+| **long 之后回 loading** | **184（正确回落）** | **600（卡死）** | ← bug 复现 |
+| 隔离 host：container 高 200 vs 800 | fitting/sizeThatFits 均 152 | — | container 高**未污染**测量 |
+
+**结论（Codex 独立复核一致）**：
+
+1. **测量是正确的**：真实 `refreshMeasurement` 在四种内容下量出的自然高（184/600/200/184）都正确。`ReviewMeasurementView` 的 `.fixedSize(horizontal:false, vertical:true)` 使**高度不会 greedy-fill**（对照：宽度因 `ThemedCard` 的 `.frame(maxWidth:.infinity)` 才填到 maxW=537.5，`natural.width` 恒为 maxW 属预期，非 bug）。→ **「greedy-fill 测量污染」假设被实测证伪**；隔离 fittingSize 也未被 800pt container 污染。
+2. **真正被复现的根因 = `ReviewWindowSizing.monotonicTarget` 的流式单调锁**（`ReviewWindowSizing.swift:43` + `AppCoordinator.applyResize` 传 `isStreaming=true`，`AppCoordinator.swift:418`）：streaming/loading 态执行 `t.height = max(lastHeight, t.height)`，round2.5 加的特判**只在 `lastHeight >= maxH(734)` 才允许回落**。当峰值停在 **maxH 以下**（如 600）、或内容变短、或某一帧瞬时测高，applied 高度就**永久卡在峰值**不回落——正是用户「涨上去下不来 / 内容短却一堆失控空白 / 窗口接近最大」的现象（H1 初始态、H2 加载过程同源）。
+3. **为什么修了两次没好**：两次修复都在**算术/测量层**打转（`ReviewWindowSizing` 111 单测全绿，但都直接喂正确自然高度、绕过真实 apply 逻辑），从未测「峰后回落」这条真实路径。这正是「happy-path 全绿 ≠ 验收通过」——绿的部分绕开了出错的环节（单调锁）。
+
+### 13.2 修复 R3-1：去除永久单调锁（本次真根因）
+
+- `applyResize` 改用 `sizing.target(natural:, visibleFrame:)`（当刻 clamp，**可增可减**），**删除** `monotonicTarget` 的 `max(lastHeight, ·)` 永久锁与 round2.5 的 `lastHeight >= maxH` 特判。
+- **抗抖**：保留 `applyResize` 现有 `0.5pt` 阈值 + `scheduleApplyLatestSize` 的 runloop 合并即可；**若** UI verify 观察到流式逐帧抖动，才追加**有界、可取消、无峰值记忆**的 shrink-settle（缩小延迟一帧/几十 ms，期间新 measurement 到来即取消重算，到点仍以最新 natural 计算）。**绝不允许**任何形式的 `max(lastHeight, ·)` 历史峰值锁。
+- **Bug1 不回归**：round2「未超 maxH 无纵向滚动条」由 `isOverflowing` 结构门控保证（`ReviewView` 依 controller 注入的 `isOverflowing` 决定是否包 `ScrollView`），**与单调锁无关**，故移除单调锁不影响 Bug1 的结构保证。
+- **统一入口（Codex 验收硬点 #1）**：`applyResize` 的**所有**入口（loading/streaming/result/error 切换、`recomputeSize` 展开路径）必须统一走 `target()`，**不得残留任何基于旧 `lastHeight` 的峰值记忆**。
+
+### 13.3 修复 R3-2：测量硬化（防御纵深，非本次根因）
+
+> 实测已证明当前测量正确；本项是**防御纵深 + 满足 spec 新增「内容自然高度按内在尺寸测量」Requirement + 验收纪律**，不是本次复现根因。诚实标注避免再次误把它当根因。
+
+- `refreshMeasurement` 弃用「挂在显示 container 上的 `measurementHosting.fittingSize`」双通道（fittingSize + preference 两条通道存在竞态），改用**独立、不挂显示 container** 的 `NSHostingController<ReviewMeasurementView>.sizeThatFits(in: CGSize(width: maxW, height: .greatestFiniteMagnitude))` 作**单一确定测量源**——固定宽、无界高，结构上免疫 container/frame 耦合与历史帧污染。
+- **测量环境等价（Codex 验收硬点 #2）**：独立测量视图必须继承与显示视图**等价的环境与约束**——宽度(=maxW)、字体/动态字号、`layoutDirection`、content 数据、状态分支；否则会把「显示容器污染」换成「测量环境不一致」的新坑。
+- `ReviewMeasurementView` 保持无 `ScrollView`、无 `maxHeight`、保留 `.fixedSize(vertical:true)`。
+
+### 13.4 H1（初始加载态失控空白）
+
+同源于 §13.1 单调锁（初始态若被上一帧高度锚定或非当刻自然高，即在取消按钮下方留失控空白）。修复即 R3-1：loading 态 applied 高度 = 当刻自然高经 clamp（下夹 `minH`），随内容回落。**留白纪律**：loading 现有 24pt 内边距属克制，可接受；cancel 按钮下方 **>32pt 视为 H1 回归**，验收须断言无失控空白。
+
+### 13.5 初始屏幕定位（Codex 按 UI/UX 定，用户已授权）
+
+用户澄清「起始更高」实为**定位诉求（往上/可往右挪）**，非尺寸。替换 `showCentered()` 里的 `expandedPanel.center()`：
+
+```swift
+let dxRatio: CGFloat = 0.54   // 比水平居中略右（不抢注意力）
+let dyRatio: CGFloat = 0.66   // 比垂直居中明显上移（进入上半视线区）
+origin.x = vf.minX + (vf.width  - frame.width)  * dxRatio
+origin.y = vf.minY + (vf.height - frame.height) * dyRatio
+keepFrameInVisibleScreen(&frame, visibleFrame: vf)
+```
+
+- `0.66`：窗口越高可移动空间越小，天然避免贴顶；`0.54`：轻微右移。
+- **宽度口径不动**（round2.5 定 `minW=336 / maxW=屏宽×0.28`）。
+- **越界兜底（Codex 验收硬点 #4）**：初始定位后、以及**每次 resize 之后**都要再走 `keepFrameInVisibleScreen`，保证整窗 `⊆ visibleFrame`，避免内容变高/变矮后越界或跳位。
+
+### 13.6 Round 3 测试策略（真实路径，禁预塞自然高，绿≠通过）
+
+> 硬约束（交开发官执行）：H1/H2 回归测试**必须驱动真实测量+apply 路径**（真实 `ReviewWindowController` / `ReviewMeasurementView`），**禁止预塞自然高度**；**必测失败路径**；`swift test` 全绿不构成通过。为此需给 `ReviewWindowController` 加 `internal` test seam（如 `refreshMeasurementForTesting()`、`applyAndReadContentSizeForTesting(phase:)`），**seam 必须调用生产 `refreshMeasurement()`/`applyResize()`，不得直接写 natural height**。
+
+| 场景（spec H1/H2 + 硬化） | 测试落点 | 断言 |
+|---|---|---|
+| **峰后回落（本次根因回归）** | 真实控制器：showCentered → long streaming（applied≈峰 600）→ short streaming | `natural.height≈小(200)` 且 `applied.height≈target(200)`、`applied≠旧峰`；再切 loading 继续回落到 ≈184，**不卡 600** |
+| 单调锁反转（纯 sizing） | `ReviewWindowSizingTests` | **反转/替换** `testHeightMonotonicWhenStreaming`；新增 `lastHeight=600,maxH=700,natural=200,isStreaming=true ⇒ 200`；覆盖 `lastHeight=maxH` 与 `lastHeight<maxH` 两类回落 |
+| H2 逐帧不超前 | 真实控制器逐块喂增量 | 每块固有高 `h_N<maxH` 时 applied≈`h_N`、`<maxH`、小步单调增；出现「先跳 maxH 再填」即 fail |
+| H1 初始无失控空白 | 真实控制器 loading | applied≈loading 固有高（下夹 minH）；cancel 下方留白 ≤32pt |
+| **greedy-fill 失败线（测量 Requirement 防御纵深）** | 真实 `ReviewMeasurementView`/measure：超高 container 下短 loading | measured height `< 0.5×maxH`；若 measured≈maxH **直接 fail** |
+| 长内容仍封顶+滚动（Codex 验收硬点 #3） | 真实控制器 | `natural>maxH` → applied clamp 到 `maxH` 且 `isOverflowing=true` 滚动可用；短内容无滚动条不回归 |
+| 初始定位不越界 | sizing/controller | dx=0.54/dy=0.66 定位后整窗 `⊆ visibleFrame`；resize 后仍在屏内 |
+
+> **CI 可行性**：真实 `NSHostingController.sizeThatFits`/控制器路径需 macOS 会话（登录态可跑；纯无头 WindowServer 环境作 AppKit 集成测试单独标注）。spec 覆盖测试标 `TBD(unit/UI:...)`，dev 阶段选可行载体，但**不得**退回「喂正确自然高度」的伪覆盖（这正是前两次复发的原因）。
+
+### 13.7 Round 3 影响面
+
+| 文件 | Round 3 改动 |
+|---|---|
+| `ReviewWindowSizing.swift` | 删除/改写 `monotonicTarget` 的单调锁与 round2.5 特判；`applyResize` 侧改调 `target()`。`target/limits/isOverflowing` 不变 |
+| `AppCoordinator.swift` | `applyResize` 统一走 `target()`（全入口）；`refreshMeasurement` 改独立 `NSHostingController.sizeThatFits` 单一源、measure 不挂显示 container；`showCentered` 定位改 dx0.54/dy0.66 + resize 后 keepFrameInVisibleScreen；加 test seam |
+| `ReviewView.swift` | `ReviewMeasurementView` 保持结构（无 ScrollView / 无 maxHeight / fixedSize vertical），确保测量环境与显示等价 |
+| `Tests/` | 新增真实路径回归测试（峰后回落 / greedy-fill 失败线 / H1 / 长内容封顶）；反转 `testHeightMonotonicWhenStreaming` |
+
+### 13.8 Codex 对抗式交叉评审摘要（Round 3）
+
+- **协作方式**：Claude 与 Codex **并行独立诊断**根因；Claude 用**实测驱动真实路径**取得 ground truth。**对抗式交叉评审 3 轮收敛**。
+- **第 1 轮（独立诊断）**：双方**都**先倾向「`NSHostingView.fittingSize` 测量污染 / greedy-fill」假设（Codex 主张改 `sizeThatFits`、measure 不挂 container）。
+- **反转（实测证伪）**：Claude 实测真实控制器路径 → 测量正确（natural 184/600/200/184 均对）、container 高不污染 fittingSize；**证伪 greedy-fill 假设**，暴露真根因 = `monotonicTarget` 单调锁「峰后不回落」。
+- **第 2 轮（对抗复核）**：把实测证据交 Codex 独立复核；Codex **独立追踪代码路径确认**（`lastHeight=600,maxH=734,natural=200 → max(600,200)=600` 卡死），**同意**真根因是单调锁、测量本身正确；细化抗抖必须「有界、可取消、无峰值记忆」+ 测试口径。
+- **第 3 轮（定稿确认）**：Codex 对定稿（R3-1 去锁 + R3-2 测量硬化 + 真实路径测试 + UI 定位 + 诚实记录反转）判**「通过」**，补 4 条开发验收硬点（统一 resize 入口、测量环境等价、长内容封顶+滚动、resize 后保持屏内）——均已并入 §13.2/13.3/13.5/13.6。
+- **结论**：3 轮收敛、无高级别不可约分歧、无需回退。**关键教训**：正确性根因必须由**驱动真实路径的实测**钉死，不能停在算术单测（前两次复发正因如此）。
+
+### 13.9 Round 3 待用户拍板的视觉项（用户已授权 Codex，仅供可选覆盖）
+
+用户已明确「留白多少、窗口放哪，让 Codex 按 UI/UX 规范设计」。以下已按 Codex 定稿写入、**开发可直接推进**，用户若要改一句话即可：
+
+| 项 | Codex 定（现默认） |
+|---|---|
+| 初始屏幕定位 | 相对可用空间 dx=0.54（略右）、dy=0.66（明显上移），不越界 |
+| 留白 | 贴合内容、仅保留现有克制内边距（loading 24pt）；cancel 下方 >32pt 视为 H1 bug |
+
+### 13.10 Round 3 后续动作建议（开发测试阶段）
+
+- 落地顺序：① **R3-1 去单调锁**（`applyResize` 全入口走 `target()`，删峰值锁）——正确性优先，先补「峰后回落」真实路径回归测试并让它先 fail 再 fix → ② **R3-2 测量改 `sizeThatFits` 独立源**（防御纵深）+ greedy-fill 失败线测试 → ③ 初始定位 dx0.54/dy0.66 + resize 后 keepFrameInVisibleScreen → ④ 反转 `testHeightMonotonicWhenStreaming`、补 H1/长内容封顶测试、把 spec H1/H2 的 `TBD` 替换真实测试路径 → ⑤ 手工 UI 验收（短/长/流式峰后变短/loading 空白/初始位置）。
+- **dev↔test 内循环红线**：测试**必须驱动真实测量+apply 路径**、**必测失败路径**（峰后回落、greedy-fill）；**`swift test` 全绿 ≠ 通过**（前两次复发的直接原因）。测试阶段独立复核这两条，正确性问题不因触发概率降级。
+
+### 13.11 Round 3 变更历史
+
+| 轮次 | 日期 | 变更 |
+|---|---|---|
+| Round 3 设计 | 2026-07-07 | **实测钉死根因反转**：greedy-fill 测量污染假设被证伪，真根因 = `monotonicTarget` 流式单调锁「峰后不回落」。R3-1 去永久单调锁（applyResize 全入口走 target、可增可减）；R3-2 测量改独立 `NSHostingController.sizeThatFits` 单一源（防御纵深）；初始定位 dx0.54/dy0.66 不越界；真实路径回归测试（峰后回落/greedy-fill 失败线/H1/长内容封顶）。Codex 对抗评审 3 轮收敛「通过」。 |
