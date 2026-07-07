@@ -29,6 +29,7 @@ enum Prompt {
         - has_issues: bool
         - original: string（原样回显输入）
         - corrected: string（最小改动修正版）
+        - translation_zh: string（corrected 的简体中文直译，帮助中文母语用户核对修正后的意思是否与本意一致；若 corrected 本身已是中文则原样返回或给一句等义中文）
         - summary_zh: string（一句话中文总评）
         - issues: array of { category, severity, before, after, reason_zh }
           - category ∈ grammar|spelling|word_choice|naturalness|tone|punctuation
@@ -60,6 +61,7 @@ enum Prompt {
                 "has_issues": ["type": "boolean"],
                 "original": ["type": "string"],
                 "corrected": ["type": "string"],
+                "translation_zh": ["type": "string"],
                 "summary_zh": ["type": "string"],
                 "issues": [
                     "type": "array",
