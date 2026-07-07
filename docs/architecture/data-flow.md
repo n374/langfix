@@ -105,7 +105,8 @@ sequenceDiagram
       "reason_zh": "中文解释：哪里错 / 为什么错 / 怎么改更自然"
     }
   ],
-  "alternative": "可选：更地道的整体改写（明确标注为「非最小改动版」，可为空）"
+  "alternative": "可选：更地道的整体改写（明确标注为「非最小改动版」，可为空）",
+  "alternative_reason_zh": "可选：一句中文说明「为什么更地道/改动点」（round6，仅当给了 alternative 时；UI 另用 input→alternative 词级 diff 高亮改动点）"
 }
 ```
 

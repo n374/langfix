@@ -80,6 +80,13 @@
 - **「停止」语义（`onStop`）**：仅停止底层请求、**保留已生成内容、窗口不关闭**（冻结为 `.stopped`）；加载态尚无内容则退化为直接关闭。决策见纯函数 `AppCoordinator.stopOutcome(for:)`。
 - **「隐藏」按钮（`onHide`）**：把窗口折叠为胶囊入口（`.hideIcon` 事件），取代旧标题栏 `minus.circle` 图标。
 
+## 5c. 更地道说法区块（round6）
+
+「更地道的整体说法（非最小改动）」不再用 `DisclosureGroup`（折叠控件会被 Tab 焦点框选中致样式问题），改为**默认展开的普通区块**，结构对齐「修正结果」：
+- 整段 alternative 文本卡片（可选中/复制）；
+- **地道版改动对照**：`input → alternative` 词级 diff（与上方「改动对照」同基线＝原文，两级修改可直接对比），复用同一删除红/新增绿着色；
+- 一句中文说明 `alternative_reason_zh`（sparkles 图标小字，说明为什么更地道）。
+
 ## 6. 状态
 
 对应 `ReviewState.Phase`：`loading / streaming(StreamingPreview) / stopped(StreamingPreview) / result(ReviewResult) / error`。
