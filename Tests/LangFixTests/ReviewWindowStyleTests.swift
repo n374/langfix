@@ -61,10 +61,16 @@ final class ReviewWindowStyleTests: XCTestCase {
         var closeCalls = 0
         let controller = ReviewWindowController(state: state, behavior: .alwaysOnTop)
         controller.onRequestClose = { closeCalls += 1 }
-        controller.handleForTesting(.hideIcon)
-        controller.handleForTesting(.tapCapsule)
+        // round6：折叠/展开切换会回调 onPresentationChange（用于同步 activation policy）；
+        // isExpandedVisible 反映当前是否处于「展开且可见」（决定是否显示顶部主菜单栏）。
+        var presentationChanges = 0
+        controller.onPresentationChange = { presentationChanges += 1 }
+        controller.handleForTesting(.hideIcon)     // 展开 → 折叠
+        controller.handleForTesting(.tapCapsule)   // 折叠 → 展开
+        _ = controller.isExpandedVisible           // 执行 getter（未 showCentered，故为 false）
         controller.handleForTesting(.closeRequested)
         XCTAssertEqual(closeCalls, 1)
+        XCTAssertGreaterThanOrEqual(presentationChanges, 2, "折叠+展开各回调一次")
         controller.close()
     }
 
@@ -342,6 +348,9 @@ final class ReviewWindowStyleTests: XCTestCase {
             }
             // 兜底：记录最后一个仍严格低于 maxH 的快照，避免搜索未命中带时返回越界（clamp 到 maxH）的快照。
             if snapshot.natural.height < maxHeight { best = snapshot }
+            // 早停：内容自然高度一旦达到/超过 maxH，再加行只会更高（band 在 maxH 以下），继续无意义。
+            // 大屏上这能把迭代从最多 90 次降到内容首次触顶的行数，避免几十次重度测量导致的超慢/偶发假死。
+            else { break }
         }
         if let best {
             return best

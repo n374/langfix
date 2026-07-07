@@ -119,6 +119,7 @@ final class AppCoordinator {
         generation += 1                 // 让在途 preview 回调（带旧 generation）失效
         reviewController?.close()        // 两 panel orderOut+close、清 delegate、移除 esc monitor
         reviewController = nil
+        syncActivationPolicy()           // 弹窗关闭后若无其它窗口则回 .accessory（收起主菜单栏与 Dock 图标）
     }
 
     /// 「停止」决策（纯函数，可单测）：流式态冻结已生成内容为部分结果；其余态直接关闭。
@@ -142,8 +143,29 @@ final class AppCoordinator {
         let c = ReviewWindowController(state: state, behavior: SettingsStore.shared.windowBehaviorMode)
         // 关闭按钮 / 标题栏关闭 → 汇聚到同一 cancel 路径。
         c.onRequestClose = { [weak self] in self?.closeReviewAndCancel() }
+        // 展开/折叠切换 → 同步 activation policy（展开时显示顶部主菜单栏，折叠回胶囊则收起）。
+        c.onPresentationChange = { [weak self] in self?.syncActivationPolicy() }
         reviewController = c
         c.showCentered()
+        syncActivationPolicy()
+    }
+
+    /// 让 macOS **顶部主菜单栏可见**（round6 需求3）：LSUIElement(`.accessory`) 应用**不显示**主菜单栏，
+    /// 故在有可交互窗口（展开的弹窗 / 设置窗）时切 `.regular`（显示 Apple/App/文件/视图/帮助 菜单栏，
+    /// 代价是此时临时出现 Dock 图标），窗口都关闭/折叠后回 `.accessory`（菜单栏应用"无 Dock 图标"常态）。
+    func syncActivationPolicy() {
+        let wantRegular = Self.wantsRegularPolicy(
+            reviewExpanded: reviewController?.isExpandedVisible ?? false,
+            settingsVisible: settingsController?.isVisible ?? false)
+        let target: NSApplication.ActivationPolicy = wantRegular ? .regular : .accessory
+        guard NSApp.activationPolicy() != target else { return }
+        NSApp.setActivationPolicy(target)
+        if target == .regular { NSApp.activate(ignoringOtherApps: true) }
+    }
+
+    /// 是否应切到 `.regular`（显示顶部主菜单栏 + 临时 Dock 图标）：任一可交互窗口可见即是。纯函数、可单测。
+    static func wantsRegularPolicy(reviewExpanded: Bool, settingsVisible: Bool) -> Bool {
+        reviewExpanded || settingsVisible
     }
 
     private func present(error: String) {
@@ -157,7 +179,10 @@ final class AppCoordinator {
 
     func openSettings() {
         if settingsController == nil { settingsController = SettingsWindowController() }
+        // 设置窗关闭 → 重新评估 activation policy（可能收起主菜单栏/Dock 图标）。
+        settingsController?.onClose = { [weak self] in self?.syncActivationPolicy() }
         settingsController?.show()
+        syncActivationPolicy()
     }
 
     func openAbout() {
@@ -233,6 +258,11 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
 
     /// Coordinator 注入：关闭按钮/标题栏关闭 → 汇聚到唯一 cancel 路径（会回调本控制器 close()）。
     var onRequestClose: (() -> Void)?
+    /// Coordinator 注入：展开/折叠切换时回调，用于同步 activation policy（主菜单栏显隐）。
+    var onPresentationChange: (() -> Void)?
+
+    /// 展开的弹窗当前是否可见（用于决定是否显示顶部主菜单栏）。折叠为胶囊 / 已关闭时为 false。
+    var isExpandedVisible: Bool { machineState.presentation == .expanded && expandedPanel.isVisible }
 
     init(state: ReviewState, behavior: WindowBehaviorMode = .normal) {
         self.state = state
@@ -632,6 +662,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         capsulePanel.setFrame(cf, display: true)
         expandedPanel.orderOut(nil)
         capsulePanel.orderFront(nil)
+        onPresentationChange?()          // 折叠 → 收起主菜单栏（回 .accessory）
     }
 
     private func applyExpand(from: ReviewWindowMode) {
@@ -641,6 +672,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         applyLevel(to: expandedPanel)
         if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
         expandedPanel.makeKeyAndOrderFront(nil)
+        onPresentationChange?()          // 展开 → 显示主菜单栏（切 .regular）
     }
 
     // MARK: - NSWindowDelegate
@@ -679,10 +711,16 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
 // MARK: - 设置窗口控制器
 
 @MainActor
-final class SettingsWindowController {
+final class SettingsWindowController: NSObject, NSWindowDelegate {
     private let window: NSWindow
 
-    init() {
+    /// 设置窗关闭回调（Coordinator 注入，用于重新评估 activation policy）。
+    var onClose: (() -> Void)?
+
+    /// 设置窗当前是否可见（用于决定是否显示顶部主菜单栏）。
+    var isVisible: Bool { window.isVisible }
+
+    override init() {
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 460, height: 520),
             styleMask: [.titled, .closable, .miniaturizable],
@@ -692,11 +730,18 @@ final class SettingsWindowController {
         window.title = "LangFix 设置"
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: SettingsView())
+        super.init()
+        window.delegate = self
     }
 
     func show() {
         window.center()
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        // 关闭后窗口 isVisible 变 false，通知 Coordinator 重算 activation policy。
+        DispatchQueue.main.async { [weak self] in self?.onClose?() }
     }
 }
