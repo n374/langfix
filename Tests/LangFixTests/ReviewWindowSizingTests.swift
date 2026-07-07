@@ -72,34 +72,24 @@ final class ReviewWindowSizingTests: XCTestCase {
         XCTAssertEqual(980.0 / 700.0, 1400.0 / 1000.0, accuracy: 0.0001)
     }
 
-    // MARK: 高度单调不减（streaming 阶段）
+    // MARK: 流式按当刻内容可增可减
 
-    func testHeightMonotonicWhenStreaming() {
-        // 自然高忽升忽降，但单调守卫下窗口高只增不减。
+    func testHeightCanFallBackWhenStreaming() {
+        // 自然高忽升忽降时，目标高度必须按当刻内容回落；永久单调锁是 round3 真根因。
         let naturals: [CGFloat] = [200, 150, 300, 260]
-        var last: CGFloat = 132
         var applied: [CGFloat] = []
         for n in naturals {
-            let t = sizing.monotonicTarget(natural: CGSize(width: 336, height: n),
-                                           visibleFrame: vf1600, lastHeight: last, isStreaming: true)
-            last = t.height
+            let t = sizing.target(natural: CGSize(width: 336, height: n), visibleFrame: vf1600)
             applied.append(t.height)
         }
-        XCTAssertEqual(applied, [200, 200, 300, 300], "streaming 下高度单调不减")
-        for i in 1..<applied.count { XCTAssertGreaterThanOrEqual(applied[i], applied[i - 1]) }
+        XCTAssertEqual(applied, [200, 150, 300, 260], "streaming 下高度可按当刻自然高回落")
     }
 
-    func testNonStreamingDoesNotForceMonotonic() {
-        // 非流式（result/error 收敛）不强制单调：允许按内容回落（controller 另有阈值防抖）。
-        let t = sizing.monotonicTarget(natural: CGSize(width: 336, height: 150),
-                                       visibleFrame: vf1600, lastHeight: 400, isStreaming: false)
-        XCTAssertEqual(t.height, 150, "非流式不强制单调增高")
-    }
-
-    func testStreamingShortContentRecoversFromTransientMaxHeight() {
-        let t = sizing.monotonicTarget(natural: CGSize(width: 336, height: 180),
-                                       visibleFrame: vf1600, lastHeight: 700, isStreaming: true)
-        XCTAssertEqual(t.height, 180, "当前自然高未触顶时，不应被上一帧 maxH 锁死")
+    func testStreamingShortContentRecoversFromSubMaxPeak() {
+        let peak = sizing.target(natural: CGSize(width: 336, height: 600), visibleFrame: vf1600)
+        let short = sizing.target(natural: CGSize(width: 336, height: 180), visibleFrame: vf1600)
+        XCTAssertLessThan(peak.height, sizing.limits(visibleFrame: vf1600).height)
+        XCTAssertEqual(short.height, 180, "当前自然高未触顶时，不应被上一帧 maxH 以下峰值锁死")
     }
 
     // MARK: 窄屏兜底（D2）

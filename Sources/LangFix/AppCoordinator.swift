@@ -173,9 +173,12 @@ private final class PassthroughHostingView<Content: View>: NSHostingView<Content
 
 /// 弹窗外壳控制器：展开 panel + 折叠胶囊 panel 共享同一 `ReviewState`（design.md §2.2 决策 D1）。
 /// - 窗口态由纯状态机 `ReviewWindowMode.reduce` 驱动（失焦/Esc→折叠、点击胶囊→展开、关闭→销毁+cancel）。
-/// - 尺寸由 `ReviewView` 上报的内容自然尺寸经 `ReviewWindowSizing` clamp + 节流 + 单调增高驱动。
+/// - 尺寸由 `ReviewView` 上报的内容自然尺寸经 `ReviewWindowSizing` clamp + runloop 合并驱动。
 @MainActor
 final class ReviewWindowController: NSObject, NSWindowDelegate {
+    private static let initialPlacementXRatio: CGFloat = 0.54
+    private static let initialPlacementYRatio: CGFloat = 0.66
+
     private let state: ReviewState
     private let behavior: WindowBehaviorMode
     private let expandedPanel: NSPanel
@@ -188,7 +191,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
 
     private let sizing = ReviewWindowSizing()
     private var machineState: ReviewWindowMachineState
-    /// 上次应用的窗口 contentSize（节流阈值 + 单调增高守卫的比较基准）。
+    /// 上次应用的窗口 contentSize（0.5pt 阈值比较基准）。
     private var lastSize: CGSize = CGSize(width: ReviewWindowSizing.minWidth, height: 200)
     private var latestNaturalSize: CGSize = CGSize(width: ReviewWindowSizing.minWidth, height: 200)
     private var latestIsOverflowing = false
@@ -238,7 +241,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         capsulePanel.isOpaque = false
         capsulePanel.hasShadow = false
 
-        measurementHosting = PassthroughHostingView(rootView: makeMeasurementView(maxContentSize: defaultMaxContentSize))
+        measurementHosting = PassthroughHostingView(rootView: makeMeasurementView(maxContentSize: defaultMaxContentSize) { _ in })
         measurementHosting.alphaValue = 0
         measurementHosting.translatesAutoresizingMaskIntoConstraints = false
         attachMeasurementHost(to: expandedContainer, maxContentSize: defaultMaxContentSize)
@@ -258,10 +261,10 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         ReviewView(state: state, maxContentSize: maxContentSize, isOverflowing: latestIsOverflowing)
     }
 
-    private func makeMeasurementView(maxContentSize: CGSize) -> ReviewMeasurementView {
-        ReviewMeasurementView(state: state, maxContentSize: maxContentSize) { [weak self] natural in
-            self?.updateNaturalSize(natural)
-        }
+    private func makeMeasurementView(maxContentSize: CGSize,
+                                     onNaturalSizeChange: @escaping (CGSize) -> Void) -> ReviewMeasurementView {
+        ReviewMeasurementView(state: state, maxContentSize: maxContentSize,
+                              onNaturalSizeChange: onNaturalSizeChange)
     }
 
     private func configureExpandedContainer() {
@@ -315,7 +318,9 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         measurementConstraints.forEach { $0.isActive = false }
         measurementConstraints = []
         measurementHosting.removeFromSuperview()
-        measurementHosting.rootView = makeMeasurementView(maxContentSize: maxContentSize)
+        measurementHosting.rootView = makeMeasurementView(maxContentSize: maxContentSize) { [weak self] _ in
+            self?.refreshMeasurement()
+        }
         measurementHosting.alphaValue = 0
         container.addSubview(measurementHosting)
         measurementConstraints = [
@@ -329,9 +334,11 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
 
     private func refreshMeasurement() {
         let maxSize = currentMaxContentSize()
-        measurementHosting.rootView = makeMeasurementView(maxContentSize: maxSize)
-        measurementHosting.layoutSubtreeIfNeeded()
-        let fitted = measurementHosting.fittingSize
+        let measuringController = NSHostingController(rootView: makeMeasurementView(maxContentSize: maxSize) { _ in })
+        measuringController.view.frame = NSRect(x: 0, y: 0, width: maxSize.width, height: 1)
+        measuringController.view.layoutSubtreeIfNeeded()
+        let fitted = measuringController.sizeThatFits(in: CGSize(width: maxSize.width,
+                                                                 height: .greatestFiniteMagnitude))
         if fitted.width > 0, fitted.height > 0 {
             updateNaturalSize(fitted)
         }
@@ -350,7 +357,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
     }
 
     func showCentered() {
-        expandedPanel.center()
+        positionExpandedPanelForInitialDisplay()
         NSApp.activate(ignoringOtherApps: true)
         expandedPanel.makeKeyAndOrderFront(nil)
         // 上屏后按真实所在屏刷新内容上限。
@@ -404,13 +411,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
     private func applyResize(_ natural: CGSize, force: Bool) {
         guard machineState.presentation == .expanded else { return }
         let vf = (expandedPanel.screen ?? NSScreen.main)?.visibleFrame ?? .zero
-        let isStreaming: Bool
-        switch state.phase {
-        case .loading, .streaming: isStreaming = true
-        default: isStreaming = false
-        }
-        let target = sizing.monotonicTarget(natural: natural, visibleFrame: vf,
-                                            lastHeight: lastSize.height, isStreaming: isStreaming)
+        let target = sizing.target(natural: natural, visibleFrame: vf)
         guard force || abs(target.width - lastSize.width) > 0.5 || abs(target.height - lastSize.height) > 0.5 else { return }
         lastSize = target
         var frame = expandedPanel.frame
@@ -419,6 +420,20 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         frame.origin.y = top - frame.height   // 顶边锚定，向下增高
         keepFrameInVisibleScreen(&frame, visibleFrame: vf)
         expandedPanel.setFrame(frame, display: true)
+    }
+
+    private func positionExpandedPanelForInitialDisplay() {
+        let vf = (expandedPanel.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        var frame = expandedPanel.frame
+        positionInitialFrame(&frame, visibleFrame: vf)
+        expandedPanel.setFrame(frame, display: false)
+    }
+
+    private func positionInitialFrame(_ frame: inout NSRect, visibleFrame vf: NSRect) {
+        guard vf != .zero else { return }
+        frame.origin.x = vf.minX + max(0, vf.width - frame.width) * Self.initialPlacementXRatio
+        frame.origin.y = vf.minY + max(0, vf.height - frame.height) * Self.initialPlacementYRatio
+        keepFrameInVisibleScreen(&frame, visibleFrame: vf)
     }
 
     /// 把越界 frame 平移回 visibleFrame 内（不缩放，仅平移）。
@@ -438,6 +453,47 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
 
     func expandedPanelAppearanceForTesting() -> (isOpaque: Bool, backgroundColor: NSColor?) {
         (expandedPanel.isOpaque, expandedPanel.backgroundColor)
+    }
+
+    static func initialFrameForTesting(windowFrame: NSRect, visibleFrame: NSRect) -> NSRect {
+        var frame = windowFrame
+        guard visibleFrame != .zero else { return frame }
+        frame.origin.x = visibleFrame.minX + max(0, visibleFrame.width - frame.width) * initialPlacementXRatio
+        frame.origin.y = visibleFrame.minY + max(0, visibleFrame.height - frame.height) * initialPlacementYRatio
+        keepFrameInVisibleScreenForTesting(&frame, visibleFrame: visibleFrame)
+        return frame
+    }
+
+    private static func keepFrameInVisibleScreenForTesting(_ frame: inout NSRect, visibleFrame vf: NSRect) {
+        guard vf != .zero else { return }
+        if frame.maxX > vf.maxX { frame.origin.x = vf.maxX - frame.width }
+        if frame.minX < vf.minX { frame.origin.x = vf.minX }
+        if frame.maxY > vf.maxY { frame.origin.y = vf.maxY - frame.height }
+        if frame.minY < vf.minY { frame.origin.y = vf.minY }
+    }
+
+    struct MeasurementSnapshot: Equatable {
+        var natural: CGSize
+        var appliedContent: CGSize
+        var maxContent: CGSize
+        var isOverflowing: Bool
+    }
+
+    @discardableResult
+    func measureAndApplyForTesting(force: Bool = true) -> MeasurementSnapshot {
+        refreshMeasurement()
+        applyResize(latestNaturalSize, force: force)
+        return measurementSnapshotForTesting()
+    }
+
+    func measurementSnapshotForTesting() -> MeasurementSnapshot {
+        let contentSize = expandedPanel.contentRect(forFrameRect: expandedPanel.frame).size
+        return MeasurementSnapshot(
+            natural: latestNaturalSize,
+            appliedContent: contentSize,
+            maxContent: currentMaxContentSize(),
+            isOverflowing: latestIsOverflowing
+        )
     }
 
     private func handle(_ event: ReviewWindowEvent) {

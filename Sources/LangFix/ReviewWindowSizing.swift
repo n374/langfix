@@ -38,20 +38,4 @@ struct ReviewWindowSizing: Equatable {
         natural.height > limits(visibleFrame: vf).height
     }
 
-    /// 带单调增高守卫的目标尺寸：loading/streaming 阶段高度只增不减（配合单调前缀守卫，防抖不闪缩）。
-    /// 非流式阶段（result/error 收敛）不强制单调，但调用方通常也不主动缩小以避免闪跳。
-    func monotonicTarget(natural: CGSize, visibleFrame vf: CGRect,
-                         lastHeight: CGFloat, isStreaming: Bool) -> CGSize {
-        var t = target(natural: natural, visibleFrame: vf)
-        let maxHeight = limits(visibleFrame: vf).height
-        if isStreaming {
-            // 若上一帧因布局瞬态被撑到 maxH，但当前自然高度仍低于 maxH，
-            // 允许回落，避免短内容在流式开始后被 70% 屏高锁死。
-            if lastHeight >= maxHeight, natural.height < maxHeight {
-                return t
-            }
-            t.height = max(lastHeight, t.height)
-        }
-        return t
-    }
 }
