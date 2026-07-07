@@ -73,18 +73,81 @@ private struct ReviewContent: View {
     @ViewBuilder var body: some View {
         switch state.phase {
         case .loading:
-            LoadingView(theme: theme, onCancel: { state.onCancel?() })
+            LoadingView(theme: theme,
+                        onHide: { state.onHide?() },
+                        onStop: { state.onStop?() })
         case .streaming(let preview):
-            StreamingPreviewView(preview: preview, theme: theme, onCancel: { state.onCancel?() })
+            StreamingPreviewView(preview: preview, theme: theme,
+                                 onHide: { state.onHide?() },
+                                 onStop: { state.onStop?() })
+        case .stopped(let preview):
+            StoppedView(preview: preview, theme: theme,
+                        onHide: { state.onHide?() },
+                        onClose: { state.onClose?() })
         case .error(let msg):
             ErrorView(message: msg, theme: theme,
                       onRetry: { state.onRetry?() },
                       onSettings: { state.onOpenSettings?() },
+                      onHide: { state.onHide?() },
                       onClose: { state.onClose?() })
         case .result(let result):
             ResultView(input: state.input, result: result, theme: theme,
+                       onHide: { state.onHide?() },
                        onClose: { state.onClose?() })
         }
+    }
+}
+
+// MARK: - 操作栏与按钮（design round4：合并 停止/关闭 + 隐藏；有设计感、匹配主题、不喧宾夺主）
+
+/// 主题化「胶囊芯片」按钮：圆角描边 + 毛玻璃卡片填充 + hover 微亮，替代原生按钮。
+/// tint 由语义决定（停止=warning、关闭/隐藏=次要文本、重试=accent），克制不抢戏。
+struct ActionChip: View {
+    let title: String
+    let systemImage: String
+    let tint: Color
+    let theme: ReviewTheme
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: systemImage).font(.system(size: 11, weight: .semibold))
+                Text(title).font(.system(size: 12.5, weight: .medium, design: .rounded))
+            }
+            .foregroundColor(tint)
+            .padding(.horizontal, 13).padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(theme.cardFill.opacity(hovering ? 0.9 : 0.45))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(tint.opacity(hovering ? 0.6 : 0.3), lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+}
+
+/// 底部统一操作栏：左「隐藏」，右侧承载各态主操作（停止/关闭/重试等）。
+private struct ReviewActionBar<Trailing: View>: View {
+    let theme: ReviewTheme
+    let onHide: () -> Void
+    @ViewBuilder let trailing: () -> Trailing
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ActionChip(title: "隐藏", systemImage: "chevron.down",
+                       tint: theme.secondaryText, theme: theme, action: onHide)
+            Spacer(minLength: 8)
+            trailing()
+        }
+        .padding(.horizontal, 14).padding(.vertical, 9)
     }
 }
 
@@ -105,15 +168,23 @@ private struct ThemedCard<Content: View>: View {
 
 private struct LoadingView: View {
     let theme: ReviewTheme
-    let onCancel: () -> Void
+    let onHide: () -> Void
+    let onStop: () -> Void
     var body: some View {
-        VStack(spacing: 16) {
-            ProgressView()
-            Text("正在检查…").foregroundColor(theme.secondaryText)
-            Button("取消", action: onCancel)   // .cancelAction 已移除：Esc 归 controller 折叠（design.md §2.3）
+        VStack(spacing: 0) {
+            VStack(spacing: 16) {
+                ProgressView()
+                Text("正在检查…").foregroundColor(theme.secondaryText)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 24).padding(.top, 24).padding(.bottom, 16)
+            Divider()
+            // loading 尚无内容可保留，「停止」退化为直接关闭（onStop 内部判定）。
+            ReviewActionBar(theme: theme, onHide: onHide) {
+                ActionChip(title: "停止", systemImage: "stop.fill",
+                           tint: theme.warning, theme: theme, action: onStop)
+            }
         }
-        .frame(maxWidth: .infinity)
-        .padding(24)
     }
 }
 
@@ -122,7 +193,8 @@ private struct LoadingView: View {
 private struct StreamingPreviewView: View {
     let preview: StreamingPreview
     let theme: ReviewTheme
-    let onCancel: () -> Void
+    let onHide: () -> Void
+    let onStop: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -137,39 +209,98 @@ private struct StreamingPreviewView: View {
             .padding(.horizontal, 14).padding(.vertical, 10)
             Divider()
 
-            VStack(alignment: .leading, spacing: 14) {
-                // corrected 逐字预览（打字机），复制禁用、无 diff 高亮。
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text("修正预览").font(.caption).foregroundColor(theme.secondaryText)
-                        Spacer()
-                        Button("复制") {}.controlSize(.small).disabled(true)   // 预览期禁用复制
-                    }
-                    ThemedCard(theme: theme) {
-                        Text(preview.corrected.isEmpty ? " " : preview.corrected)
-                            .textSelection(.enabled)
-                            .foregroundColor(theme.primaryText)
-                    }
-                    if let s = preview.summaryZh, !s.trimmed.isEmpty {
-                        Text(s).font(.caption).foregroundColor(theme.secondaryText)
-                    }
-                }
-                // 已闭合的 issue 卡片按分区增量填充。
-                if !preview.issues.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("逐条说明").font(.caption).foregroundColor(theme.secondaryText)
-                        ForEach(preview.issues) { issue in IssueCard(issue: issue, theme: theme) }
-                    }
-                }
-            }
-            .padding(14)
+            PreviewBody(preview: preview, theme: theme)
+                .padding(14)
 
             Divider()
-            HStack {
-                Spacer()
-                Button("取消", action: onCancel)   // .cancelAction 已移除（同上）
+            // 流式中：「停止」= 停止输出、保留已有内容（onStop 冻结为 .stopped）。
+            ReviewActionBar(theme: theme, onHide: onHide) {
+                ActionChip(title: "停止", systemImage: "stop.fill",
+                           tint: theme.warning, theme: theme, action: onStop)
             }
-            .padding(.horizontal, 14).padding(.vertical, 8)
+        }
+    }
+}
+
+/// 用户主动停止后的部分结果：与流式预览同布局，但改为「已停止」徽标，主操作为「关闭」。
+private struct StoppedView: View {
+    let preview: StreamingPreview
+    let theme: ReviewTheme
+    let onHide: () -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Label("已停止（部分结果）", systemImage: "stop.circle")
+                    .foregroundColor(theme.warning).font(.subheadline.bold())
+                Spacer()
+            }
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            Divider()
+
+            PreviewBody(preview: preview, theme: theme)
+                .padding(14)
+
+            Divider()
+            ReviewActionBar(theme: theme, onHide: onHide) {
+                ActionChip(title: "关闭", systemImage: "xmark",
+                           tint: theme.secondaryText, theme: theme, action: onClose)
+            }
+        }
+    }
+}
+
+/// 流式预览 / 停止态共用的正文：corrected 预览 + 中文直译 + 总评 + 已闭合 issue 卡。
+/// 复制禁用：预览/部分结果非最终真相（承接流式红线）。
+private struct PreviewBody: View {
+    let preview: StreamingPreview
+    let theme: ReviewTheme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("修正预览").font(.caption).foregroundColor(theme.secondaryText)
+                    Spacer()
+                    Button("复制") {}.controlSize(.small).disabled(true)   // 预览期禁用复制
+                }
+                ThemedCard(theme: theme) {
+                    Text(preview.corrected.isEmpty ? " " : preview.corrected)
+                        .textSelection(.enabled)
+                        .foregroundColor(theme.primaryText)
+                }
+                if let t = preview.translationZh, !t.trimmed.isEmpty {
+                    TranslationLine(text: t, theme: theme)
+                }
+                if let s = preview.summaryZh, !s.trimmed.isEmpty {
+                    Text(s).font(.caption).foregroundColor(theme.secondaryText)
+                }
+            }
+            if !preview.issues.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("逐条说明").font(.caption).foregroundColor(theme.secondaryText)
+                    ForEach(preview.issues) { issue in IssueCard(issue: issue, theme: theme) }
+                }
+            }
+        }
+    }
+}
+
+/// 中文直译行：小字、带「译」前缀，帮助中文母语用户核对修正后含义。
+private struct TranslationLine: View {
+    let text: String
+    let theme: ReviewTheme
+    var body: some View {
+        HStack(alignment: .top, spacing: 5) {
+            Image(systemName: "character.book.closed")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(theme.accent)
+            Text(text)
+                .font(.caption)
+                .foregroundColor(theme.secondaryText)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -179,19 +310,26 @@ private struct ErrorView: View {
     let theme: ReviewTheme
     let onRetry: () -> Void
     let onSettings: () -> Void
+    let onHide: () -> Void
     let onClose: () -> Void
     var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "exclamationmark.triangle").font(.largeTitle).foregroundColor(theme.error)
-            Text(message).multilineTextAlignment(.center).foregroundColor(theme.secondaryText)
-            HStack {
-                Button("重试", action: onRetry)
-                Button("打开设置", action: onSettings)
-                Button("关闭", action: onClose)   // 关闭 → 销毁 + cancel（唯一 cancel 路径）
+        VStack(spacing: 0) {
+            VStack(spacing: 14) {
+                Image(systemName: "exclamationmark.triangle").font(.largeTitle).foregroundColor(theme.error)
+                Text(message).multilineTextAlignment(.center).foregroundColor(theme.secondaryText)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 24).padding(.top, 24).padding(.bottom, 16)
+            Divider()
+            ReviewActionBar(theme: theme, onHide: onHide) {
+                ActionChip(title: "打开设置", systemImage: "gearshape",
+                           tint: theme.secondaryText, theme: theme, action: onSettings)
+                ActionChip(title: "重试", systemImage: "arrow.clockwise",
+                           tint: theme.accent, theme: theme, action: onRetry)
+                ActionChip(title: "关闭", systemImage: "xmark",
+                           tint: theme.secondaryText, theme: theme, action: onClose)
             }
         }
-        .frame(maxWidth: .infinity)
-        .padding(24)
     }
 }
 
@@ -199,6 +337,7 @@ private struct ResultView: View {
     let input: String
     let result: ReviewResult
     let theme: ReviewTheme
+    let onHide: () -> Void
     let onClose: () -> Void
 
     @State private var copied = false
@@ -260,6 +399,9 @@ private struct ResultView: View {
                     .textSelection(.enabled)
                     .foregroundColor(theme.primaryText)
             }
+            if !result.translationZh.trimmed.isEmpty {
+                TranslationLine(text: result.translationZh, theme: theme)
+            }
             if !result.summaryZh.trimmed.isEmpty {
                 Text(result.summaryZh).font(.caption).foregroundColor(theme.secondaryText)
             }
@@ -305,11 +447,11 @@ private struct ResultView: View {
     }
 
     private var footer: some View {
-        HStack {
-            Spacer()
-            Button("关闭", action: onClose)   // .cancelAction 已移除：关闭只能点按钮/标题栏，Esc 归折叠
+        // 完成态：主操作合并为「关闭」（与流式态「停止」同一按钮位，随态切换文案/图标）。
+        ReviewActionBar(theme: theme, onHide: onHide) {
+            ActionChip(title: "关闭", systemImage: "xmark",
+                       tint: theme.secondaryText, theme: theme, action: onClose)
         }
-        .padding(.horizontal, 14).padding(.vertical, 8)
     }
 }
 

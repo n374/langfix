@@ -230,18 +230,44 @@ final class ReviewWindowStyleTests: XCTestCase {
     }
 
     @MainActor
-    func testInitialFrameIsUpperRightBiasedAndInsideVisibleFrame() {
+    func testInitialFrameFollowsMouseToRightWhenSpaceAvailable() {
         let visibleFrame = NSRect(x: 120, y: 80, width: 1600, height: 1000)
-        let windowFrame = NSRect(x: 0, y: 0, width: 420, height: 220)
-        let frame = ReviewWindowController.initialFrameForTesting(windowFrame: windowFrame,
-                                                                  visibleFrame: visibleFrame)
-        let centeredOrigin = NSPoint(
-            x: visibleFrame.minX + (visibleFrame.width - windowFrame.width) / 2,
-            y: visibleFrame.minY + (visibleFrame.height - windowFrame.height) / 2
-        )
+        let windowSize = CGSize(width: 420, height: 220)
+        // 鼠标在屏左侧，右侧有充足空间 → 窗口落在鼠标右侧并留 gap。
+        let mouse = NSPoint(x: 400, y: 600)
+        let frame = ReviewWindowController.placeInitialFrame(
+            windowSize: windowSize, mouseLocation: mouse, visibleFrame: visibleFrame,
+            gap: 24, topMarginRatio: 0.12)
+        XCTAssertEqual(frame.origin.x, mouse.x + 24, accuracy: 0.5, "窗口左边缘 = 鼠标 x + gap（在鼠标右侧）")
+        XCTAssertTrue(visibleFrame.contains(frame), "不越界")
+    }
 
-        XCTAssertGreaterThan(frame.origin.y, centeredOrigin.y)
-        XCTAssertGreaterThan(frame.origin.x, centeredOrigin.x)
+    @MainActor
+    func testInitialFrameFlipsToLeftWhenRightHasNoRoom() {
+        let visibleFrame = NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let windowSize = CGSize(width: 420, height: 220)
+        // 鼠标贴近右边界，右侧放不下 → 翻到鼠标左侧。
+        let mouse = NSPoint(x: 1400, y: 500)
+        let frame = ReviewWindowController.placeInitialFrame(
+            windowSize: windowSize, mouseLocation: mouse, visibleFrame: visibleFrame,
+            gap: 24, topMarginRatio: 0.12)
+        XCTAssertLessThanOrEqual(frame.maxX, mouse.x, "窗口整体在鼠标左侧")
+        XCTAssertTrue(visibleFrame.contains(frame), "不越界")
+    }
+
+    @MainActor
+    func testInitialFrameVerticalTopAnchorBiasedUp() {
+        let visibleFrame = NSRect(x: 0, y: 0, width: 1600, height: 1000)
+        let windowSize = CGSize(width: 420, height: 220)
+        let mouse = NSPoint(x: 300, y: 500)
+        let frame = ReviewWindowController.placeInitialFrame(
+            windowSize: windowSize, mouseLocation: mouse, visibleFrame: visibleFrame,
+            gap: 24, topMarginRatio: 0.12)
+        // 顶边应锚定在 屏顶 - 屏高×0.12 附近（偏上）。
+        let expectedTopEdge = visibleFrame.maxY - visibleFrame.height * 0.12
+        XCTAssertEqual(frame.maxY, expectedTopEdge, accuracy: 0.5, "顶边锚定在屏顶下方 12% 处（居中略偏上）")
+        // 顶边高于屏幕竖直中点（偏上而非居中）。
+        XCTAssertGreaterThan(frame.maxY, visibleFrame.midY)
         XCTAssertTrue(visibleFrame.contains(frame))
     }
 

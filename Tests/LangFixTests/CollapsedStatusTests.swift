@@ -8,6 +8,8 @@ final class CollapsedStatusTests: XCTestCase {
     func testPhaseToStatusMapping() {
         XCTAssertEqual(CollapsedStatus(.loading), .working)
         XCTAssertEqual(CollapsedStatus(.streaming(StreamingPreview(corrected: "x"))), .working)
+        XCTAssertEqual(CollapsedStatus(.stopped(StreamingPreview(corrected: "x"))), .done,
+                       "停止态为已完成（非进行中），胶囊显示 done")
         XCTAssertEqual(CollapsedStatus(.result(sampleResult())), .done)
         XCTAssertEqual(CollapsedStatus(.error("boom")), .failed)
     }

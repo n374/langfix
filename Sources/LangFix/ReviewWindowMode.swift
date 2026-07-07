@@ -138,7 +138,7 @@ enum CollapsedStatus: Equatable, Sendable {
     init(_ phase: ReviewState.Phase) {
         switch phase {
         case .loading, .streaming: self = .working
-        case .result:              self = .done
+        case .stopped, .result:    self = .done
         case .error:               self = .failed
         }
     }

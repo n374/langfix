@@ -48,6 +48,21 @@ final class AppCoordinator {
         state.phase = .loading
         // 关闭语义统一：onCancel / onClose 都汇聚到唯一幂等 cancel 路径（修复现状 onClose 不 cancel 的正确性 bug）。
         Self.wireCloseSemantics(state: state) { [weak self] in self?.closeReviewAndCancel() }
+        // 「停止」语义：停止底层请求但保留已生成内容、窗口不关闭（冻结为 .stopped）。
+        // 与 onCancel/onClose 的差别是不销毁窗口——用户明确要求「只显示已有内容」。
+        state.onStop = { [weak self, weak state] in
+            guard let self, let state else { return }
+            switch Self.stopOutcome(for: state.phase) {
+            case .close:
+                // 尚无内容可保留（如 loading）→ 退化为直接关闭。
+                self.closeReviewAndCancel()
+            case .freeze(let preview):
+                self.currentTask?.cancel()
+                self.currentTask = nil
+                self.generation += 1             // 让在途 preview 回调（带旧 generation）失效，不再覆盖 stopped
+                state.phase = .stopped(preview)
+            }
+        }
         state.onRetry = { [weak self] in self?.start(input: input, cfg: SettingsStore.shared.config()) }
         state.onOpenSettings = { [weak self] in self?.openSettings() }
         present(state: state)
@@ -104,6 +119,13 @@ final class AppCoordinator {
         generation += 1                 // 让在途 preview 回调（带旧 generation）失效
         reviewController?.close()        // 两 panel orderOut+close、清 delegate、移除 esc monitor
         reviewController = nil
+    }
+
+    /// 「停止」决策（纯函数，可单测）：流式态冻结已生成内容为部分结果；其余态直接关闭。
+    enum StopOutcome { case freeze(StreamingPreview); case close }
+    static func stopOutcome(for phase: ReviewState.Phase) -> StopOutcome {
+        if case .streaming(let preview) = phase { return .freeze(preview) }
+        return .close
     }
 
     /// 把 ReviewState 的关闭/取消回调统一汇聚到单一 cancel 闭包。
@@ -181,8 +203,12 @@ private final class PassthroughHostingView<Content: View>: NSHostingView<Content
 /// - 尺寸由 `ReviewView` 上报的内容自然尺寸经 `ReviewWindowSizing` clamp + runloop 合并驱动。
 @MainActor
 final class ReviewWindowController: NSObject, NSWindowDelegate {
-    private static let initialPlacementXRatio: CGFloat = 0.54
-    private static let initialPlacementYRatio: CGFloat = 0.66
+    /// 跟随鼠标定位：窗口与鼠标之间的呼吸间距（水平）。
+    private static let followMouseGap: CGFloat = 24
+    /// 竖直定位：以「窗口最大化时上下居中、再稍偏上」为目标锚定顶边——
+    /// 顶边距屏顶 = 屏高 × 该比例。取 0.12 使满高窗（≈屏高 70%）上间距 12%、下间距 18%，
+    /// 相对居中（各 15%）略偏上，符合用户「上下居中再稍微往上一些」的诉求。
+    private static let verticalTopMarginRatio: CGFloat = 0.12
 
     private let state: ReviewState
     private let behavior: WindowBehaviorMode
@@ -226,6 +252,8 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         stateChangeCancellable = state.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async { self?.refreshMeasurement() }
         }
+        // 「隐藏」按钮（现位于弹窗底部操作栏）→ 折叠为胶囊，与旧标题栏隐藏图标同一 .hideIcon 事件。
+        state.onHide = { [weak self] in self?.handle(.hideIcon) }
         configurePanels()
     }
 
@@ -240,7 +268,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         let hosting = NSHostingView(rootView: makeReviewView(maxContentSize: defaultMaxContentSize))
         expandedHosting = hosting
         configureExpandedContainer()
-        installHideAccessory()
+        // 隐藏功能已下沉到弹窗底部操作栏的「隐藏」按钮（design round4），不再用标题栏 minus.circle 图标。
 
         // 折叠胶囊 panel：透明、承载 SwiftUI 胶囊。
         let capsuleHosting = NSHostingView(rootView: CollapsedReviewEntry(state: state, behavior: behavior) { [weak self] in
@@ -310,29 +338,6 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
             capsuleHosting.topAnchor.constraint(equalTo: capsuleContainer.topAnchor),
             capsuleHosting.bottomAnchor.constraint(equalTo: capsuleContainer.bottomAnchor),
         ])
-    }
-
-    private func installHideAccessory() {
-        let button = NSButton(image: NSImage(systemSymbolName: "minus.circle",
-                                             accessibilityDescription: "隐藏为胶囊") ?? NSImage(),
-                              target: self,
-                              action: #selector(hideButtonPressed))
-        button.isBordered = false
-        button.toolTip = "隐藏为胶囊"
-        button.setButtonType(.momentaryPushIn)
-        button.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: 28),
-            button.heightAnchor.constraint(equalToConstant: 28),
-        ])
-        let vc = NSTitlebarAccessoryViewController()
-        vc.layoutAttribute = .right
-        vc.view = button
-        expandedPanel.addTitlebarAccessoryViewController(vc)
-    }
-
-    @objc private func hideButtonPressed() {
-        handle(.hideIcon)
     }
 
     private func attachMeasurementHost(to container: NSView, maxContentSize: CGSize) {
@@ -439,20 +444,46 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
 
     private func positionExpandedPanelForInitialDisplay() {
         let vf = (expandedPanel.screen ?? preferredScreen ?? NSScreen.main)?.visibleFrame ?? .zero
-        var frame = expandedPanel.frame
-        positionInitialFrame(&frame, visibleFrame: vf)
+        let frame = Self.placeInitialFrame(windowSize: expandedPanel.frame.size,
+                                           mouseLocation: NSEvent.mouseLocation,
+                                           visibleFrame: vf,
+                                           gap: Self.followMouseGap,
+                                           topMarginRatio: Self.verticalTopMarginRatio)
         expandedPanel.setFrame(frame, display: false)
     }
 
-    private func positionInitialFrame(_ frame: inout NSRect, visibleFrame vf: NSRect) {
-        guard vf != .zero else { return }
-        frame.origin.x = vf.minX + max(0, vf.width - frame.width) * Self.initialPlacementXRatio
-        frame.origin.y = vf.minY + max(0, vf.height - frame.height) * Self.initialPlacementYRatio
-        keepFrameInVisibleScreen(&frame, visibleFrame: vf)
+    /// 跟随鼠标定位的纯函数（与 AppKit 解耦、可单测）：
+    /// - 水平：优先把窗口放在鼠标右侧并留 `gap` 呼吸间距；右侧放不下则翻到鼠标左侧同样留 `gap`。
+    /// - 竖直：以「最大化时上下居中略偏上」为目标，锚定顶边到 `屏顶 - 屏高×topMarginRatio`。
+    /// - 最后统一 clamp 回 visibleFrame，保证任何屏幕/鼠标位置都不越界。
+    static func placeInitialFrame(windowSize: CGSize,
+                                  mouseLocation: NSPoint,
+                                  visibleFrame vf: NSRect,
+                                  gap: CGFloat,
+                                  topMarginRatio: CGFloat) -> NSRect {
+        var frame = NSRect(origin: .zero, size: windowSize)
+        guard vf != .zero else { return frame }
+        // 水平：鼠标右侧留 gap；越过右边界则翻到左侧。
+        let rightX = mouseLocation.x + gap
+        if rightX + windowSize.width <= vf.maxX {
+            frame.origin.x = rightX
+        } else {
+            frame.origin.x = mouseLocation.x - gap - windowSize.width
+        }
+        // 竖直：锚定顶边（bottom-left 坐标系里 origin.y = 顶边 - 高）。
+        let topEdgeY = vf.maxY - vf.height * topMarginRatio
+        frame.origin.y = topEdgeY - windowSize.height
+        clampToVisibleFrame(&frame, visibleFrame: vf)
+        return frame
     }
 
     /// 把越界 frame 平移回 visibleFrame 内（不缩放，仅平移）。
     private func keepFrameInVisibleScreen(_ frame: inout NSRect, visibleFrame vf: NSRect) {
+        Self.clampToVisibleFrame(&frame, visibleFrame: vf)
+    }
+
+    /// clamp 的纯静态实现（实例路径与初始定位共用同一份逻辑，杜绝两份漂移）。
+    static func clampToVisibleFrame(_ frame: inout NSRect, visibleFrame vf: NSRect) {
         guard vf != .zero else { return }
         if frame.maxX > vf.maxX { frame.origin.x = vf.maxX - frame.width }
         if frame.minX < vf.minX { frame.origin.x = vf.minX }
@@ -482,21 +513,14 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         screens.first(where: { $0.contains(mouseLocation) }) ?? fallback
     }
 
-    static func initialFrameForTesting(windowFrame: NSRect, visibleFrame: NSRect) -> NSRect {
-        var frame = windowFrame
-        guard visibleFrame != .zero else { return frame }
-        frame.origin.x = visibleFrame.minX + max(0, visibleFrame.width - frame.width) * initialPlacementXRatio
-        frame.origin.y = visibleFrame.minY + max(0, visibleFrame.height - frame.height) * initialPlacementYRatio
-        keepFrameInVisibleScreenForTesting(&frame, visibleFrame: visibleFrame)
-        return frame
-    }
-
-    private static func keepFrameInVisibleScreenForTesting(_ frame: inout NSRect, visibleFrame vf: NSRect) {
-        guard vf != .zero else { return }
-        if frame.maxX > vf.maxX { frame.origin.x = vf.maxX - frame.width }
-        if frame.minX < vf.minX { frame.origin.x = vf.minX }
-        if frame.maxY > vf.maxY { frame.origin.y = vf.maxY - frame.height }
-        if frame.minY < vf.minY { frame.origin.y = vf.minY }
+    static func initialFrameForTesting(windowFrame: NSRect,
+                                       mouseLocation: NSPoint,
+                                       visibleFrame: NSRect) -> NSRect {
+        placeInitialFrame(windowSize: windowFrame.size,
+                          mouseLocation: mouseLocation,
+                          visibleFrame: visibleFrame,
+                          gap: followMouseGap,
+                          topMarginRatio: verticalTopMarginRatio)
     }
 
     private static func screenContainingMouse() -> NSScreen? {
