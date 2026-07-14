@@ -1,0 +1,101 @@
+import XCTest
+import CoreGraphics
+@testable import LangFix
+
+/// 覆盖 spec review-window「弹窗尺寸随内容自适应」的四个 Scenario（纯策略逻辑）。
+final class ReviewWindowSizingTests: XCTestCase {
+    private let sizing = ReviewWindowSizing()   // minHeight = 132
+    /// 1600×1000 屏 → maxW=448(=1600×0.28)、maxH=700(=1000×0.7)。
+    private let vf1600 = CGRect(x: 0, y: 0, width: 1600, height: 1000)
+
+    // MARK: 短内容出小窗
+
+    func testShortContentYieldsSmallWindow() {
+        let t = sizing.target(natural: CGSize(width: 300, height: 90), visibleFrame: vf1600)
+        XCTAssertEqual(t.width, 336, "宽 < minW 夹到 336")
+        XCTAssertEqual(t.height, 132, "高 < minH 夹到 minH=132（贴近内容自然高，不撑满高）")
+        XCTAssertLessThan(t.height, sizing.limits(visibleFrame: vf1600).height, "短内容高远小于 maxH")
+    }
+
+    // MARK: 宽度按屏幕相对范围 clamp（三档）
+
+    func testWidthClampThreeBuckets() {
+        func w(_ nat: CGFloat) -> CGFloat {
+            sizing.target(natural: CGSize(width: nat, height: 300), visibleFrame: vf1600).width
+        }
+        XCTAssertEqual(w(300), 336, "小于 minW → 336")
+        XCTAssertEqual(w(400), 400, "范围内 → 取自然宽")
+        XCTAssertEqual(w(900), 448, accuracy: 0.001, "大于 maxW → 夹到 maxW=1600×0.28=448")
+    }
+
+    // MARK: 流式增高到上限后滚动（末帧封顶）
+
+    func testHeightGrowsThenCapsAtMaxH() {
+        let naturals: [CGFloat] = [120, 180, 260, 900]
+        let heights = naturals.map {
+            sizing.target(natural: CGSize(width: 336, height: $0), visibleFrame: vf1600).height
+        }
+        XCTAssertEqual(heights, [132, 180, 260, 700], "低于 minH 夹 132；范围内取自然；超 maxH 封顶 700（末帧需内部滚动）")
+    }
+
+    func testNoOverflowUntilNaturalHeightExceedsMaxH() {
+        let maxH = sizing.limits(visibleFrame: vf1600).height
+        let frames: [CGFloat] = [132, 240, 699.9, 700]
+        for h in frames {
+            XCTAssertFalse(
+                sizing.isOverflowing(natural: CGSize(width: 336, height: h), visibleFrame: vf1600),
+                "naturalH=\(h) ≤ maxH 时显示树不应包 ScrollView"
+            )
+        }
+        XCTAssertTrue(
+            sizing.isOverflowing(natural: CGSize(width: 336, height: maxH + 0.1), visibleFrame: vf1600),
+            "只有 naturalH > maxH 才允许显示树包 ScrollView"
+        )
+    }
+
+    func testFrameByFrameNaturalUnderMaxMatchesWindowHeight() {
+        let frames: [CGFloat] = [150, 220, 360, 520, 700]
+        for naturalH in frames {
+            let target = sizing.target(natural: CGSize(width: 336, height: naturalH), visibleFrame: vf1600)
+            XCTAssertEqual(target.height, naturalH, accuracy: 0.001)
+            XCTAssertFalse(sizing.isOverflowing(natural: CGSize(width: 336, height: naturalH), visibleFrame: vf1600))
+        }
+    }
+
+    // MARK: 上限随分辨率按比例缩放（非固定 px）
+
+    func testMaxHeightScalesWithResolution() {
+        let vfTall = CGRect(x: 0, y: 0, width: 1600, height: 1400)
+        XCTAssertEqual(sizing.limits(visibleFrame: vf1600).height, 700, accuracy: 0.001)   // 1000×0.7
+        XCTAssertEqual(sizing.limits(visibleFrame: vfTall).height, 980, accuracy: 0.001)   // 1400×0.7
+        // 两屏 maxH 之比 == 两屏高之比（比例恒定，非固定像素）。
+        XCTAssertEqual(980.0 / 700.0, 1400.0 / 1000.0, accuracy: 0.0001)
+    }
+
+    // MARK: 流式按当刻内容可增可减
+
+    func testHeightCanFallBackWhenStreaming() {
+        // 自然高忽升忽降时，目标高度必须按当刻内容回落；永久单调锁是 round3 真根因。
+        let naturals: [CGFloat] = [200, 150, 300, 260]
+        var applied: [CGFloat] = []
+        for n in naturals {
+            let t = sizing.target(natural: CGSize(width: 336, height: n), visibleFrame: vf1600)
+            applied.append(t.height)
+        }
+        XCTAssertEqual(applied, [200, 150, 300, 260], "streaming 下高度可按当刻自然高回落")
+    }
+
+    func testStreamingShortContentRecoversFromSubMaxPeak() {
+        let peak = sizing.target(natural: CGSize(width: 336, height: 600), visibleFrame: vf1600)
+        let short = sizing.target(natural: CGSize(width: 336, height: 180), visibleFrame: vf1600)
+        XCTAssertLessThan(peak.height, sizing.limits(visibleFrame: vf1600).height)
+        XCTAssertEqual(short.height, 180, "当前自然高未触顶时，不应被上一帧 maxH 以下峰值锁死")
+    }
+
+    // MARK: 窄屏兜底（D2）
+
+    func testNarrowScreenWidthFloor() {
+        let narrow = CGRect(x: 0, y: 0, width: 1000, height: 800)   // 1000×0.28=280 < 336
+        XCTAssertEqual(sizing.limits(visibleFrame: narrow).width, 336, "窄屏 maxW 以 336 兜底，区间不非法")
+    }
+}

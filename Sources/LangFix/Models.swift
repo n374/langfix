@@ -82,9 +82,13 @@ struct ReviewResult: Codable, Sendable {
     var hasIssues: Bool
     var original: String
     var corrected: String
+    /// corrected 的简体中文直译（帮助中文母语用户核对修正后含义与本意一致）。模型可能不返回，缺省为空串。
+    var translationZh: String
     var summaryZh: String
     var issues: [Issue]
     var alternative: String?
+    /// alternative（更地道整体说法）的一句中文说明：为什么这样更地道。模型可能不返回，缺省空串。
+    var alternativeReasonZh: String
 
     /// 应用侧标记：护栏判定两轮都超阈值，提示用户改动较大（不参与 JSON 编解码）。
     var overEdited: Bool = false
@@ -93,19 +97,24 @@ struct ReviewResult: Codable, Sendable {
         case hasIssues = "has_issues"
         case original
         case corrected
+        case translationZh = "translation_zh"
         case summaryZh = "summary_zh"
         case issues
         case alternative
+        case alternativeReasonZh = "alternative_reason_zh"
     }
 
     init(hasIssues: Bool, original: String, corrected: String,
-         summaryZh: String, issues: [Issue], alternative: String? = nil) {
+         translationZh: String = "", summaryZh: String, issues: [Issue],
+         alternative: String? = nil, alternativeReasonZh: String = "") {
         self.hasIssues = hasIssues
         self.original = original
         self.corrected = corrected
+        self.translationZh = translationZh
         self.summaryZh = summaryZh
         self.issues = issues
         self.alternative = alternative
+        self.alternativeReasonZh = alternativeReasonZh
     }
 
     init(from decoder: Decoder) throws {
@@ -113,15 +122,17 @@ struct ReviewResult: Codable, Sendable {
         self.hasIssues = (try? c.decode(Bool.self, forKey: .hasIssues)) ?? false
         self.original = (try? c.decode(String.self, forKey: .original)) ?? ""
         self.corrected = (try? c.decode(String.self, forKey: .corrected)) ?? ""
+        self.translationZh = (try? c.decode(String.self, forKey: .translationZh)) ?? ""
         self.summaryZh = (try? c.decode(String.self, forKey: .summaryZh)) ?? ""
         self.issues = (try? c.decode([Issue].self, forKey: .issues)) ?? []
         self.alternative = try? c.decodeIfPresent(String.self, forKey: .alternative)
+        self.alternativeReasonZh = (try? c.decode(String.self, forKey: .alternativeReasonZh)) ?? ""
     }
 
-    /// 纯文本/解析失败时的兜底结果：以本地输入为 corrected。
+    /// 纯文本/解析失败时的兜底结果：以本地输入为 corrected（无翻译）。
     static func fallback(localInput: String, note: String) -> ReviewResult {
         ReviewResult(hasIssues: false, original: localInput, corrected: localInput,
-                     summaryZh: note, issues: [])
+                     translationZh: "", summaryZh: note, issues: [])
     }
 }
 
@@ -132,6 +143,8 @@ struct ReviewResult: Codable, Sendable {
 struct StreamingPreview: Sendable {
     /// corrected 稳定前缀（打字机逐字输出，单调不回退）。
     var corrected: String
+    /// translation_zh：corrected 的中文直译，字符串闭合后整体填充（不逐字）。
+    var translationZh: String?
     /// summary_zh：字符串闭合后整体填充（不逐字）。
     var summaryZh: String?
     /// 仅「已完整闭合」的 issue object（避免半张卡片乱跳）。
@@ -143,9 +156,10 @@ struct StreamingPreview: Sendable {
 
     enum Stage: Sendable { case receiving, finalizing }
 
-    init(corrected: String = "", summaryZh: String? = nil, issues: [Issue] = [],
-         alternative: String? = nil, stage: Stage = .receiving) {
+    init(corrected: String = "", translationZh: String? = nil, summaryZh: String? = nil,
+         issues: [Issue] = [], alternative: String? = nil, stage: Stage = .receiving) {
         self.corrected = corrected
+        self.translationZh = translationZh
         self.summaryZh = summaryZh
         self.issues = issues
         self.alternative = alternative

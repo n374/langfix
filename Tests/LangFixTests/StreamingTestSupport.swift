@@ -105,12 +105,13 @@ final class PreviewRecorder {
 /// 记录 ReviewState.Phase 跳转序列，用于「首字早于末字」「取消后不再更新」等顺序断言。
 @MainActor
 final class PhaseRecorder {
-    enum Mark: Equatable { case loading, streaming, result, error }
+    enum Mark: Equatable { case loading, streaming, stopped, result, error }
     private(set) var marks: [Mark] = []
     func record(_ phase: ReviewState.Phase) {
         switch phase {
         case .loading: marks.append(.loading)
         case .streaming: marks.append(.streaming)
+        case .stopped: marks.append(.stopped)
         case .result: marks.append(.result)
         case .error: marks.append(.error)
         }

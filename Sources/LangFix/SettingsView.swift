@@ -90,9 +90,37 @@ struct SettingsView: View {
 
     private var generalSection: some View {
         VStack(alignment: .leading, spacing: 8) {
+            // 弹窗主题：切换即时生效（@Published → 弹窗 SwiftUI 自动重绘），持久化到 UserDefaults。
+            field("弹窗主题") {
+                Picker("弹窗主题", selection: $settings.reviewThemeRaw) {
+                    ForEach(ReviewThemeID.allCases) { id in
+                        Text(ReviewThemeCatalog.theme(id).displayName).tag(id.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+            windowBehaviorSection
             Toggle("流式渲染（逐字预览，端点不支持时自动回退）", isOn: $settings.streamingEnabled)
             Toggle("登录时启动（常驻，消除冷启动延迟）", isOn: $launchAtLogin)
                 .onChange(of: launchAtLogin) { on in setLaunchAtLogin(on) }
+        }
+    }
+
+    private var windowBehaviorSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("窗口行为").font(.caption).foregroundColor(.secondary)
+            VStack(spacing: 6) {
+                ForEach(WindowBehaviorMode.allCases) { mode in
+                    WindowBehaviorModeCard(
+                        mode: mode,
+                        selected: settings.windowBehaviorMode == mode,
+                        theme: settings.reviewTheme
+                    ) {
+                        settings.windowBehaviorModeRaw = mode.rawValue
+                    }
+                }
+            }
         }
     }
 
@@ -155,5 +183,45 @@ struct SettingsView: View {
                 Text("\(value.wrappedValue)").font(.caption.monospaced())
             }
         }
+    }
+}
+
+private struct WindowBehaviorModeCard: View {
+    let mode: WindowBehaviorMode
+    let selected: Bool
+    let theme: ReviewTheme
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: mode.iconName)
+                    .frame(width: 22)
+                    .foregroundColor(selected ? theme.accent : .secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(mode.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(.primary)
+                    Text(mode.subtitle)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundColor(selected ? theme.accent : .secondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+            .background(theme.cardFill.opacity(selected ? 0.72 : 0.36))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(selected ? theme.accent : theme.cardStroke,
+                            lineWidth: selected ? 1.5 : 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
     }
 }
