@@ -25,13 +25,18 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/LangFix"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+BUILD_NUMBER="$(git rev-list --count HEAD 2>/dev/null || date +%Y%m%d%H%M)"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$APP/Contents/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add :LangFixBuildSHA string $GIT_SHA" "$APP/Contents/Info.plist" 2>/dev/null || \
+  /usr/libexec/PlistBuddy -c "Set :LangFixBuildSHA $GIT_SHA" "$APP/Contents/Info.plist" 2>/dev/null || true
 
 echo "==> ad-hoc 代码签名"
 codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 || \
   echo "（codesign 失败，可忽略；首次运行可能需在系统设置里放行）"
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist" 2>/dev/null || echo 0.0.0)"
-echo "==> 完成：$APP (v$VERSION)"
+echo "==> 完成：$APP (v$VERSION, build $BUILD_NUMBER, sha $GIT_SHA)"
 
 case "$MODE" in
   dmg)

@@ -29,11 +29,13 @@ enum Prompt {
         - has_issues: bool
         - original: string（原样回显输入）
         - corrected: string（最小改动修正版）
+        - translation_zh: string（corrected 的简体中文直译，帮助中文母语用户核对修正后的意思是否与本意一致；若 corrected 本身已是中文则原样返回或给一句等义中文）
         - summary_zh: string（一句话中文总评）
         - issues: array of { category, severity, before, after, reason_zh }
           - category ∈ grammar|spelling|word_choice|naturalness|tone|punctuation
           - severity ∈ error|improvement|optional
         - alternative: string（可选，更地道的整体改写，明确是非最小改动版；无则省略或空字符串）
+        - alternative_reason_zh: string（可选，一句中文说明"为什么这个更地道说法更好/改动点在哪"；仅当给了 alternative 时填，否则空）
         不要输出 JSON 以外的任何文字。
 
         为优化流式预览体验，请在 JSON 中【尽量优先输出 corrected 字段】（其余字段随后给出）。这只影响字段先后顺序、不改变上述任何正确性要求。
@@ -60,6 +62,7 @@ enum Prompt {
                 "has_issues": ["type": "boolean"],
                 "original": ["type": "string"],
                 "corrected": ["type": "string"],
+                "translation_zh": ["type": "string"],
                 "summary_zh": ["type": "string"],
                 "issues": [
                     "type": "array",
@@ -79,6 +82,7 @@ enum Prompt {
                     ],
                 ],
                 "alternative": ["type": "string"],
+                "alternative_reason_zh": ["type": "string"],
             ],
             "required": ["has_issues", "original", "corrected", "summary_zh", "issues"],
         ],

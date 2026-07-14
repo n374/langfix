@@ -42,8 +42,30 @@
 - 落地：建 Xcode 工程，菜单栏 + NSPanel + Service provider 骨架。
 - 验收：对应 spec R1（触发即出窗）与 NFR-1（<300ms）。
 
+### 6.1 顶层主菜单（round4 补充）
+
+`LSUIElement` 应用默认**无主菜单栏**。为满足「顶层状态栏菜单」与「Cmd+, 打开设置」（macOS 通用约定），
+在 `applicationDidFinishLaunching` 显式 `NSApp.mainMenu = AppMenu.build(target:)` 装一套主菜单（`AppMenu` 为纯构造、可单测）：
+
+- **App 菜单**：关于 / 设置…（`Cmd+,`）/ 检查剪贴板 / 隐藏（`Cmd+H`）/ 退出（`Cmd+Q`）。
+- **Edit 菜单**：撤销·重做·剪切·复制·粘贴·全选（走 first responder，使弹窗与设置文本框支持标准编辑快捷键）。
+- **Window 菜单**：最小化（`Cmd+M`）/ 关闭（`Cmd+W`）。
+
+`Cmd+,` 等 key equivalent 经 responder 链生效。右上角 `MenuBarExtra` 状态栏图标保留不变。
+
+### 6.2 顶部主菜单栏"可见"——动态 activation policy（round6 修订）
+
+round4 只设了 `NSApp.mainMenu`，但 `.accessory`(LSUIElement) 应用**即使前台也不显示顶部主菜单栏**（Apple/App名/文件/视图/帮助），用户因此"看不到菜单"。根因是 activation policy：`.accessory` 恒不显示主菜单栏。
+
+修复（`AppCoordinator.syncActivationPolicy`）：**有可交互窗口（展开的弹窗 / 设置窗）时切 `.regular`**（此时才显示顶部主菜单栏），窗口全部关闭/折叠后回 `.accessory`。
+- 决策纯函数 `wantsRegularPolicy(reviewExpanded:settingsVisible:)` 可单测；调用点：弹窗展示/关闭、展开/折叠(`onPresentationChange`)、设置窗开/关(`onClose`)。
+- **权衡**：`.regular` 会**临时出现 Dock 图标**（仅在有窗口交互期间）；关掉窗口即恢复"无 Dock 图标"的菜单栏应用常态。这是"要可见主菜单栏"与"无 Dock 图标"不可兼得下的折中，如用户更在意后者可回退为仅保留 Cmd+, 快捷键（不显示菜单栏）。
+- **验证边界**：主菜单栏是否真的显示是运行期 AppKit 行为，headless/CI 无法断言；自动化只覆盖 policy 决策与窗口可见性状态，**真机由用户确认**。
+
 ## 7. 修订历史
 
 | 日期 | 状态变更 | 摘要 |
 |---|---|---|
 | 2026-06-29 | → Accepted | 初始决策 |
+| 2026-07-07 | 补充 | round4：LSUIElement 应用补装顶层主菜单（App/Edit/Window）+ Cmd+, 打开设置 |
+| 2026-07-08 | 修订 | round6：主菜单栏对 `.accessory` 不显示 → 动态 activation policy（有窗口切 `.regular` 显示菜单栏，代价临时 Dock 图标） |

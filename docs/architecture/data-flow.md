@@ -94,6 +94,7 @@ sequenceDiagram
   "has_issues": true,                  // 是否存在需修改项
   "original": "...",                   // 回显（用于 diff 与校验）
   "corrected": "最小改动修正版",         // 主结果
+  "translation_zh": "corrected 的简体中文直译",  // round4：帮助中文母语用户核对修正后含义；可缺省（缺则空串）
   "summary_zh": "一句话总评（中文）",
   "issues": [
     {
@@ -104,7 +105,8 @@ sequenceDiagram
       "reason_zh": "中文解释：哪里错 / 为什么错 / 怎么改更自然"
     }
   ],
-  "alternative": "可选：更地道的整体改写（明确标注为「非最小改动版」，可为空）"
+  "alternative": "可选：更地道的整体改写（明确标注为「非最小改动版」，可为空）",
+  "alternative_reason_zh": "可选：一句中文说明「为什么更地道/改动点」（round6，仅当给了 alternative 时；UI 另用 input→alternative 词级 diff 高亮改动点）"
 }
 ```
 

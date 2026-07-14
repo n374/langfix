@@ -43,4 +43,45 @@ final class ModelsTests: XCTestCase {
         let out = AIClient.extractJSON(messy)
         XCTAssertEqual(out, "{\"corrected\":\"x\"}")
     }
+
+    // round4 需求2：corrected 的中文直译 translation_zh。
+
+    func testReviewResultDecodesTranslationZh() throws {
+        let json = """
+        {"has_issues": false, "original": "Thx", "corrected": "Thanks",
+         "translation_zh": "谢谢", "summary_zh": "更完整", "issues": []}
+        """
+        let r = try JSONDecoder().decode(ReviewResult.self, from: json.data(using: .utf8)!)
+        XCTAssertEqual(r.translationZh, "谢谢")
+    }
+
+    func testReviewResultTranslationZhDefaultsEmptyWhenAbsent() throws {
+        // 模型未返回 translation_zh 时宽容缺省为空串（不影响其它字段）。
+        let json = """
+        {"has_issues": false, "original": "ok", "corrected": "ok", "summary_zh": "", "issues": []}
+        """
+        let r = try JSONDecoder().decode(ReviewResult.self, from: json.data(using: .utf8)!)
+        XCTAssertEqual(r.translationZh, "")
+    }
+
+    // round6 需求2：更地道说法的一句中文说明 alternative_reason_zh。
+
+    func testReviewResultDecodesAlternativeReasonZh() throws {
+        let json = """
+        {"has_issues": true, "original": "I want to know", "corrected": "I would like to know",
+         "summary_zh": "更礼貌", "issues": [],
+         "alternative": "Could you let me know", "alternative_reason_zh": "疑问句式更自然委婉"}
+        """
+        let r = try JSONDecoder().decode(ReviewResult.self, from: json.data(using: .utf8)!)
+        XCTAssertEqual(r.alternative, "Could you let me know")
+        XCTAssertEqual(r.alternativeReasonZh, "疑问句式更自然委婉")
+    }
+
+    func testAlternativeReasonZhDefaultsEmptyWhenAbsent() throws {
+        let json = """
+        {"has_issues": false, "original": "ok", "corrected": "ok", "summary_zh": "", "issues": []}
+        """
+        let r = try JSONDecoder().decode(ReviewResult.self, from: json.data(using: .utf8)!)
+        XCTAssertEqual(r.alternativeReasonZh, "")
+    }
 }
