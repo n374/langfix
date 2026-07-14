@@ -12,5 +12,6 @@
 | [0003](./0003-openai-compatible-chat-completions.md) | AI 接入走 OpenAI 兼容 Chat Completions + 结构化输出降级 | Accepted | 2026-06-29 |
 | [0004](./0004-minimal-edit-guard.md) | 最小改动护栏（diff 比例阈值 + 重试） | Accepted | 2026-06-29 |
 | [0005](./0005-v1-scope.md) | V1 范围：非流式、不自动替换选区 | Accepted | 2026-06-29 |
+| [0006](./0006-bounded-followup.md) | 引入「围绕结果的有限多轮追问答疑」 | Accepted | 2026-07-14 |
 
 每个 ADR 就技术权衡本身陈述决策与备选方案。新增决策时在上表抢占下一个编号，写 `decisions/NNNN-<topic>.md`。
