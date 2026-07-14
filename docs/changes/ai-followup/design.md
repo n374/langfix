@@ -223,3 +223,4 @@ sequenceDiagram
 | 2026-07-14 | 初稿（技术架构 D1–D10 + 影响面 + 测试） | 技术方案官 |
 | 2026-07-14 | Codex 定稿 §4 UI/交互设计（艺术化、四主题自适应） | Codex（技术方案官整合） |
 | 2026-07-14 | Codex 对抗式评审 1 轮返回 `需改`（5 高 2 中），逐条采纳整合：D6 加应用层输出护栏、D4 加越界引用校验与错误映射/回退语义、D3 修正取消语义分层+强化旧响应隔离、D2 拆 key-free config 快照、UI-7 补 escMonitor 焦点桥接 | 技术方案官 |
+| 2026-07-15 | 开发落地（开发官）：实现 FollowUpSession/AIClient 追问层/Prompt/ReviewView UI + 165 单测。开发阶段 Codex 对抗式评审 3 轮收敛（6→2→0，最终「通过」），额外硬化：①截断(finish=length)/空回答/无完成信号(缺 [DONE] 且缺 finish_reason)一律 fail loud 回退非流式，绝不当完整（新增 `ReviewError.truncated`）；②流式边流边过输出护栏，替代全文不在流式阶段原样露出；③输出护栏加 verbatim 子串检测（单遍替换，防自替换死循环）；④Prompt.sanitizeDelimiter 中和 `<<<RESULT`/`RESULT>>>` delimiter 碰撞；⑤inFlightTask 完成即释放（含 key 的 cfg 不驻留）；⑥IME Esc 改查 field editor `hasMarkedText` 真状态 | 开发官 |

@@ -91,7 +91,7 @@ private struct ReviewContent: View {
                       onHide: { state.onHide?() },
                       onClose: { state.onClose?() })
         case .result(let result):
-            ResultView(input: state.input, result: result, theme: theme,
+            ResultView(state: state, result: result, theme: theme,
                        onHide: { state.onHide?() },
                        onClose: { state.onClose?() })
         }
@@ -345,14 +345,20 @@ private struct ErrorView: View {
 }
 
 private struct ResultView: View {
-    let input: String
+    @ObservedObject var state: ReviewState
     let result: ReviewResult
     let theme: ReviewTheme
     let onHide: () -> Void
     let onClose: () -> Void
 
     @State private var copied = false
+    /// 追问输入草稿。
+    @State private var draft = ""
+    @FocusState private var composerFocused: Bool
+    /// 被引用修正卡片的短暂高亮序号（design UI-3）。
+    @State private var highlightedIndex: Int?
 
+    private var input: String { state.input }
     private var segs: [DiffEngine.Seg] { DiffEngine.segments(input, result.corrected) }
 
     var body: some View {
@@ -367,6 +373,9 @@ private struct ResultView: View {
                 if !result.issues.isEmpty { issuesBlock }
                 if let alt = result.alternative, !alt.trimmed.isEmpty {
                     alternativeBlock(alt, reason: result.alternativeReasonZh)
+                }
+                if let session = state.followUp {
+                    followUpArea(session)
                 }
             }
             .padding(14)
@@ -442,9 +451,51 @@ private struct ResultView: View {
     private var issuesBlock: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("逐条说明").font(.caption).foregroundColor(theme.secondaryText)
-            ForEach(result.issues) { issue in
-                IssueCard(issue: issue, theme: theme)
+            // 序号 = 数组 1-based 下标（design D1，与追问上下文同源）；点击卡片注入「修正 N」引用。
+            ForEach(Array(result.issues.enumerated()), id: \.element.id) { pair in
+                IssueCard(issue: pair.element, theme: theme, index: pair.offset + 1,
+                          onReference: state.followUp != nil ? { injectReference($0) } : nil,
+                          highlighted: highlightedIndex == pair.offset + 1)
             }
+        }
+    }
+
+    // MARK: 追问区（ai-followup change · design §4 UI-1..UI-6）
+
+    @ViewBuilder
+    private func followUpArea(_ session: FollowUpSession) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Rectangle().fill(theme.cardStroke.opacity(0.55)).frame(height: 1)
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles").font(.caption2)
+                Text("AI 追问").font(.caption)
+                Spacer()
+            }
+            .foregroundColor(theme.secondaryText).opacity(0.72)
+            if !session.turns.isEmpty || session.streaming != nil {
+                FollowUpConversation(session: session, theme: theme,
+                                     onReferenceTap: { highlightPulse($0) })
+            }
+        }
+    }
+
+    /// 点击修正卡 → 把「修正 N」注入草稿并聚焦输入框（design UI-3，不覆盖已有草稿）。
+    private func injectReference(_ n: Int) {
+        let token = "修正 \(n)"
+        if draft.trimmed.isEmpty {
+            draft = token + " "
+        } else if !draft.contains(token) {
+            draft += (draft.hasSuffix(" ") ? "" : " ") + token + " "
+        }
+        composerFocused = true
+        highlightPulse(n)
+    }
+
+    private func highlightPulse(_ n: Int) {
+        highlightedIndex = n
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            if highlightedIndex == n { highlightedIndex = nil }
         }
     }
 
@@ -473,21 +524,293 @@ private struct ResultView: View {
         }
     }
 
+    @ViewBuilder
     private var footer: some View {
-        // 完成态：主操作合并为「关闭」（与流式态「停止」同一按钮位，随态切换文案/图标）。
-        ReviewActionBar(theme: theme, onHide: onHide) {
-            ActionChip(title: "关闭", systemImage: "xmark",
-                       tint: theme.secondaryText, theme: theme, action: onClose)
+        if let session = state.followUp {
+            VStack(spacing: 0) {
+                // composer 上沿即时提示（引用越界 / 硬超预算），软提示不阻断（design UI-6）。
+                if let notice = session.composerNotice {
+                    HStack(spacing: 5) {
+                        Image(systemName: "exclamationmark.circle").font(.caption2)
+                        Text(notice).font(.caption2)
+                        Spacer()
+                    }
+                    .foregroundColor(theme.warning)
+                    .padding(.horizontal, 14).padding(.top, 8)
+                }
+                HStack(spacing: 8) {
+                    ActionChip(title: "隐藏", systemImage: "chevron.down",
+                               tint: theme.secondaryText, theme: theme, action: onHide)
+                    composer(session)
+                    ActionChip(title: "关闭", systemImage: "xmark",
+                               tint: theme.secondaryText, theme: theme, action: onClose)
+                }
+                .padding(.horizontal, 14).padding(.vertical, 9)
+            }
+        } else {
+            // 无追问会话（理论上 result 态恒有；防御性回退）：主操作合并为「关闭」。
+            ReviewActionBar(theme: theme, onHide: onHide) {
+                ActionChip(title: "关闭", systemImage: "xmark",
+                           tint: theme.secondaryText, theme: theme, action: onClose)
+            }
         }
+    }
+
+    /// 追问输入框（design UI-2）：footer「隐藏」与「关闭」之间；Enter 发送；右侧按钮随态切换。
+    @ViewBuilder
+    private func composer(_ session: FollowUpSession) -> some View {
+        HStack(spacing: 6) {
+            TextField("追问本次修正，或输入“修正 2 …”", text: $draft)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12.5))
+                .foregroundColor(theme.primaryText)
+                .focused($composerFocused)
+                .onSubmit { submit(session) }
+                .onChange(of: draft) { _ in
+                    session.clearNotice()
+                }
+                .onChange(of: composerFocused) { focused in
+                    state.composerFocused = focused
+                }
+            trailingButton(session)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous).fill(theme.cardFill.opacity(0.58))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(theme.accent.opacity(composerFocused ? 0.55 : 0.22), lineWidth: 1)
+        )
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private func trailingButton(_ session: FollowUpSession) -> some View {
+        switch session.streaming?.stage {
+        case .receiving, .finalizing:
+            // 在途 → 停止（丢弃半截、不写历史，design D3）。
+            iconButton("stop.fill", tint: theme.warning) { session.stopCurrent() }
+        case .failed:
+            // 失败 → 重试（复用同一问题与结果绑定）。
+            iconButton("arrow.clockwise", tint: theme.error) { session.retry() }
+        case nil:
+            iconButton("paperplane.fill", tint: draft.trimmed.isEmpty ? theme.secondaryText : theme.accent) {
+                submit(session)
+            }
+            .disabled(draft.trimmed.isEmpty)
+        }
+    }
+
+    private func iconButton(_ system: String, tint: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: system).font(.system(size: 13, weight: .semibold)).foregroundColor(tint)
+                .frame(width: 22, height: 22)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func submit(_ session: FollowUpSession) {
+        let q = draft
+        guard !q.trimmed.isEmpty, !session.isBusy else { return }
+        session.ask(q)
+        // 越界/硬超限时 ask 会置 composerNotice 且不发请求；此时保留草稿供用户修正。
+        if session.composerNotice == nil {
+            draft = ""
+        }
+    }
+}
+
+// MARK: - 追问对话（气泡列表 + 流式 Markdown + 自动滚底，design UI-1/UI-4/D9）
+
+private struct FollowUpConversation: View {
+    @ObservedObject var session: FollowUpSession
+    let theme: ReviewTheme
+    let onReferenceTap: (Int) -> Void
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(session.turns) { turn in
+                        UserBubble(text: turn.question, refs: turn.referencedIndices,
+                                   theme: theme, onReferenceTap: onReferenceTap)
+                        AIBubble(text: turn.answer, streaming: false, theme: theme)
+                    }
+                    if let s = session.streaming {
+                        UserBubble(text: s.question, refs: s.referencedIndices,
+                                   theme: theme, onReferenceTap: onReferenceTap)
+                        switch s.stage {
+                        case .failed:
+                            FailedBubble(message: s.errorText ?? "回答中断", theme: theme) { session.retry() }
+                        case .receiving, .finalizing:
+                            AIBubble(text: s.answer.isEmpty ? "正在回答…" : s.answer,
+                                     streaming: true, theme: theme)
+                        }
+                    }
+                    Color.clear.frame(height: 1).id(Self.bottomID)
+                }
+                .padding(.vertical, 2)
+            }
+            .frame(maxHeight: 220)
+            .onChange(of: session.turns.count) { _ in scrollToBottom(proxy) }
+            .onChange(of: session.streaming?.answer) { _ in scrollToBottom(proxy) }
+            .onChange(of: session.streaming?.stage) { _ in scrollToBottom(proxy) }
+        }
+    }
+
+    private static let bottomID = "followup-bottom"
+    private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+    }
+}
+
+/// 修正引用 chip 行（气泡顶部，点击回滚/高亮对应卡片）。
+private struct ReferenceChips: View {
+    let refs: [Int]
+    let theme: ReviewTheme
+    let onTap: (Int) -> Void
+    var body: some View {
+        if !refs.isEmpty {
+            HStack(spacing: 4) {
+                ForEach(refs, id: \.self) { n in
+                    Button { onTap(n) } label: {
+                        Text("修正 \(n)")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(theme.accent)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .background(theme.accent.opacity(0.14))
+                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(theme.accent.opacity(0.3), lineWidth: 1))
+                            .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+}
+
+private struct UserBubble: View {
+    let text: String
+    let refs: [Int]
+    let theme: ReviewTheme
+    let onReferenceTap: (Int) -> Void
+    var body: some View {
+        HStack {
+            Spacer(minLength: 40)
+            VStack(alignment: .trailing, spacing: 3) {
+                ReferenceChips(refs: refs, theme: theme, onTap: onReferenceTap)
+                Text(text)
+                    .font(.system(size: 12.5))
+                    .foregroundColor(theme.primaryText)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 10).padding(.vertical, 7)
+                    .background(theme.accent.opacity(0.16))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+        }
+    }
+}
+
+private struct AIBubble: View {
+    let text: String
+    let streaming: Bool
+    let theme: ReviewTheme
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .bottom, spacing: 2) {
+                    MarkdownText(raw: text, theme: theme)
+                    if streaming { TypingCursor(theme: theme) }
+                }
+                .padding(.horizontal, 10).padding(.vertical, 7)
+                .background(theme.cardFill.opacity(0.68))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.cardStroke, lineWidth: theme.borderWidth))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            Spacer(minLength: 24)
+        }
+    }
+}
+
+private struct FailedBubble: View {
+    let message: String
+    let theme: ReviewTheme
+    let onRetry: () -> Void
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 6) {
+                Label("回答中断", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption.bold()).foregroundColor(theme.error)
+                Text(message).font(.caption).foregroundColor(theme.secondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                ActionChip(title: "重试", systemImage: "arrow.clockwise",
+                           tint: theme.accent, theme: theme, action: onRetry)
+            }
+            .padding(10)
+            .background(theme.error.opacity(0.08))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.error.opacity(0.3), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            Spacer(minLength: 24)
+        }
+    }
+}
+
+/// 流式打字机光标：细竖条，0.8s 闪烁（design UI-4）。
+private struct TypingCursor: View {
+    let theme: ReviewTheme
+    @State private var on = true
+    var body: some View {
+        RoundedRectangle(cornerRadius: 1)
+            .fill(theme.accent.opacity(on ? 0.9 : 0.1))
+            .frame(width: 2, height: 14)
+            .onAppear {
+                withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) { on.toggle() }
+            }
+    }
+}
+
+/// 尽力 Markdown 渲染（design D8）：inline 语法 + 保留换行；解析失败回退纯文本，不报错、不闪。
+private struct MarkdownText: View {
+    let raw: String
+    let theme: ReviewTheme
+    var body: some View {
+        Text(attributed)
+            .font(.system(size: 12.5))
+            .foregroundColor(theme.primaryText)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+    private var attributed: AttributedString {
+        let opts = AttributedString.MarkdownParsingOptions(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        return (try? AttributedString(markdown: raw, options: opts)) ?? AttributedString(raw)
     }
 }
 
 private struct IssueCard: View {
     let issue: Issue
     let theme: ReviewTheme
+    /// 1-based 稳定序号（design D1）。`nil` = 流式预览态，不渲染可引用序号（spec「预览期不开放序号」）。
+    var index: Int? = nil
+    /// 点击卡片把「修正 N」注入追问输入框（design UI-3）。仅 `.result` 态提供。
+    var onReference: ((Int) -> Void)? = nil
+    /// 被引用高亮（design UI-3）：命中时描边加亮 + glow。
+    var highlighted: Bool = false
+    @State private var hovering = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
+                if let index {
+                    Text("修正 \(index)")
+                        .font(.caption2.bold())
+                        .foregroundColor(theme.accent)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(theme.accent.opacity(0.16))
+                        .overlay(RoundedRectangle(cornerRadius: 5).stroke(theme.accent.opacity(0.36), lineWidth: 1))
+                        .cornerRadius(5)
+                }
                 Text(issue.category.badge)
                     .font(.caption2.bold())
                     .padding(.horizontal, 6).padding(.vertical, 2)
@@ -497,6 +820,10 @@ private struct IssueCard: View {
                     .font(.caption2)
                     .foregroundColor(severityColor)
                 Spacer()
+                if index != nil, hovering {
+                    Image(systemName: "quote.bubble")
+                        .font(.caption2).foregroundColor(theme.accent.opacity(0.8))
+                }
             }
             HStack(spacing: 4) {
                 Text(issue.before).strikethrough().foregroundColor(theme.error)
@@ -509,7 +836,16 @@ private struct IssueCard: View {
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(theme.cardFill.opacity(0.5))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(theme.accent.opacity(highlighted ? 0.75 : 0), lineWidth: highlighted ? 1.4 : 0)
+        )
+        .shadow(color: theme.glow.opacity(highlighted ? theme.glowOpacity : 0), radius: highlighted ? 10 : 0)
         .cornerRadius(6)
+        .contentShape(RoundedRectangle(cornerRadius: 6))
+        .onHover { if index != nil { hovering = $0 } }
+        .onTapGesture { if let index, let onReference { onReference(index) } }
+        .animation(.easeOut(duration: 0.2), value: highlighted)
     }
 
     private var severityColor: Color {

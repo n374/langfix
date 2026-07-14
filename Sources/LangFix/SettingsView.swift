@@ -127,7 +127,7 @@ struct SettingsView: View {
     private var privacyNote: some View {
         VStack(alignment: .leading, spacing: 4) {
             Label("隐私", systemImage: "lock.shield").font(.caption.bold()).foregroundColor(.secondary)
-            Text("API key 仅存于 macOS Keychain；不记录原文与修正文。注意：选中文本会通过 HTTPS 发送到你配置的端点处理（非本地处理），敏感内容请自行选择可信端点。")
+            Text("API key 仅存于 macOS Keychain；不记录原文与修正文。注意：选中文本与你的追问内容都会通过 HTTPS 发送到你配置的端点处理（非本地处理），敏感内容请自行选择可信端点。追问会话仅存于当前结果窗口的内存，关窗即清、不落盘。")
                 .font(.caption).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
