@@ -40,6 +40,9 @@ enum IssueSeverity: String, Codable, Sendable {
 
 struct Issue: Codable, Identifiable, Sendable {
     let id = UUID()
+    /// 模型输出的 1-based 序号（「修正 N」）。缺省/非法为 0 → 由 `ReviewResult.numberedIssues` 按位置兜底重排。
+    /// 权威序号解析在 `ReviewResult.numberedIssues` 单一来源，保证 UI 显示与追问上下文同源（design D1）。
+    var index: Int
     var category: IssueCategory
     var severity: IssueSeverity
     var before: String
@@ -47,11 +50,12 @@ struct Issue: Codable, Identifiable, Sendable {
     var reasonZh: String
 
     enum CodingKeys: String, CodingKey {
-        case category, severity, before, after
+        case index, category, severity, before, after
         case reasonZh = "reason_zh"
     }
 
-    init(category: IssueCategory, severity: IssueSeverity, before: String, after: String, reasonZh: String) {
+    init(index: Int = 0, category: IssueCategory, severity: IssueSeverity, before: String, after: String, reasonZh: String) {
+        self.index = index
         self.category = category
         self.severity = severity
         self.before = before
@@ -61,6 +65,7 @@ struct Issue: Codable, Identifiable, Sendable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.index = (try? c.decode(Int.self, forKey: .index)) ?? 0
         self.category = IssueCategory.lenient((try? c.decode(String.self, forKey: .category)) ?? "")
         self.severity = IssueSeverity.lenient((try? c.decode(String.self, forKey: .severity)) ?? "")
         self.before = (try? c.decode(String.self, forKey: .before)) ?? ""
@@ -70,6 +75,7 @@ struct Issue: Codable, Identifiable, Sendable {
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(index, forKey: .index)
         try c.encode(category.rawValue, forKey: .category)
         try c.encode(severity.rawValue, forKey: .severity)
         try c.encode(before, forKey: .before)
@@ -133,6 +139,21 @@ struct ReviewResult: Codable, Sendable {
     static func fallback(localInput: String, note: String) -> ReviewResult {
         ReviewResult(hasIssues: false, original: localInput, corrected: localInput,
                      translationZh: "", summaryZh: note, issues: [])
+    }
+
+    /// **权威带序号修正（单一来源，design D1 同源）**：UI 显示「修正 N」与追问上下文编号都读这里，杜绝漂移。
+    /// - 模型输出的 `index` 若构成严格 1..N 排列（连续、无重、无缺）→ **采用模型序号**并按其升序排列（满足用户「让 LLM 输出该格式」）。
+    /// - 否则（缺省/跳号/重号/越界）→ **应用按位置重排** 1..N 兜底（正确性优先，绝不让「修正 N」指错条目）。
+    /// 返回 (序号, issue) 且序号必为连续 1..N，与数组顺序一致。
+    var numberedIssues: [(index: Int, issue: Issue)] {
+        let n = issues.count
+        guard n > 0 else { return [] }
+        let idxs = issues.map { $0.index }
+        if Set(idxs) == Set(1...n) {                       // 严格 1..N 排列 → 采用模型序号，按其排序
+            let ordered = issues.sorted { $0.index < $1.index }
+            return ordered.map { ($0.index, $0) }
+        }
+        return issues.enumerated().map { ($0.offset + 1, $0.element) }   // 兜底：按位置重排
     }
 }
 

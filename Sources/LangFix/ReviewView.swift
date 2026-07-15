@@ -24,12 +24,16 @@ struct ReviewView: View {
     var body: some View {
         Group {
             if isOverflowing {
-                ScrollView {
-                    content
+                // 超上限走整体滚动；追问对话已并入主内容流（不再有内层固定高度容器），
+                // 由这里的 ScrollViewReader 承载「新问答自动滚到底」（proxy 下传给追问区）。
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        content(scrollProxy: proxy)
+                    }
+                    .frame(maxHeight: maxContentSize.height, alignment: .topLeading)
                 }
-                .frame(maxHeight: maxContentSize.height, alignment: .topLeading)
             } else {
-                content
+                content(scrollProxy: nil)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -38,8 +42,8 @@ struct ReviewView: View {
         .animation(.easeOut(duration: theme.animationDuration), value: theme.id)
     }
 
-    private var content: some View {
-        ReviewContent(state: state, theme: theme)
+    private func content(scrollProxy: ScrollViewProxy?) -> some View {
+        ReviewContent(state: state, theme: theme, scrollProxy: scrollProxy)
             .frame(maxWidth: maxContentSize.width, alignment: .leading)
     }
 }
@@ -69,6 +73,8 @@ struct ReviewMeasurementView: View {
 private struct ReviewContent: View {
     @ObservedObject var state: ReviewState
     let theme: ReviewTheme
+    /// 外层 ScrollView 的 proxy（仅 overflow 显示态有值）：供追问区自动滚到底。measurement 态为 nil。
+    var scrollProxy: ScrollViewProxy? = nil
 
     @ViewBuilder var body: some View {
         switch state.phase {
@@ -91,7 +97,7 @@ private struct ReviewContent: View {
                       onHide: { state.onHide?() },
                       onClose: { state.onClose?() })
         case .result(let result):
-            ResultView(state: state, result: result, theme: theme,
+            ResultView(state: state, result: result, theme: theme, scrollProxy: scrollProxy,
                        onHide: { state.onHide?() },
                        onClose: { state.onClose?() })
         }
@@ -348,6 +354,7 @@ private struct ResultView: View {
     @ObservedObject var state: ReviewState
     let result: ReviewResult
     let theme: ReviewTheme
+    var scrollProxy: ScrollViewProxy? = nil
     let onHide: () -> Void
     let onClose: () -> Void
 
@@ -451,11 +458,12 @@ private struct ResultView: View {
     private var issuesBlock: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("逐条说明").font(.caption).foregroundColor(theme.secondaryText)
-            // 序号 = 数组 1-based 下标（design D1，与追问上下文同源）；点击卡片注入「修正 N」引用。
-            ForEach(Array(result.issues.enumerated()), id: \.element.id) { pair in
-                IssueCard(issue: pair.element, theme: theme, index: pair.offset + 1,
+            // 序号来源 = ReviewResult.numberedIssues 单一解析（模型 index 有效则采用、否则位置重排；
+            // 与追问上下文同源 design D1）；点击卡片注入「修正 N」引用。
+            ForEach(result.numberedIssues, id: \.issue.id) { pair in
+                IssueCard(issue: pair.issue, theme: theme, index: pair.index,
                           onReference: state.followUp != nil ? { injectReference($0) } : nil,
-                          highlighted: highlightedIndex == pair.offset + 1)
+                          highlighted: highlightedIndex == pair.index)
             }
         }
     }
@@ -473,7 +481,8 @@ private struct ResultView: View {
             }
             .foregroundColor(theme.secondaryText).opacity(0.72)
             if !session.turns.isEmpty || session.streaming != nil {
-                FollowUpConversation(session: session, theme: theme,
+                // 并入主结果同一滚动流（无内层固定高度容器）；自动滚底由外层 scrollProxy 承载（user review #2）。
+                FollowUpConversation(session: session, theme: theme, scrollProxy: scrollProxy,
                                      onReferenceTap: { highlightPulse($0) })
             }
         }
@@ -626,41 +635,43 @@ private struct ResultView: View {
 private struct FollowUpConversation: View {
     @ObservedObject var session: FollowUpSession
     let theme: ReviewTheme
+    /// 外层整体 ScrollView 的 proxy（user review #2：追问并入主流，不再有内层滚动容器）。可能为 nil（内容未溢出时无需滚动）。
+    var scrollProxy: ScrollViewProxy? = nil
     let onReferenceTap: (Int) -> Void
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(session.turns) { turn in
-                        UserBubble(text: turn.question, refs: turn.referencedIndices,
-                                   theme: theme, onReferenceTap: onReferenceTap)
-                        AIBubble(text: turn.answer, streaming: false, theme: theme)
-                    }
-                    if let s = session.streaming {
-                        UserBubble(text: s.question, refs: s.referencedIndices,
-                                   theme: theme, onReferenceTap: onReferenceTap)
-                        switch s.stage {
-                        case .failed:
-                            FailedBubble(message: s.errorText ?? "回答中断", theme: theme) { session.retry() }
-                        case .receiving, .finalizing:
-                            AIBubble(text: s.answer.isEmpty ? "正在回答…" : s.answer,
-                                     streaming: true, theme: theme)
-                        }
-                    }
-                    Color.clear.frame(height: 1).id(Self.bottomID)
-                }
-                .padding(.vertical, 2)
+        // 无内层 ScrollView / 固定高度：气泡随主结果整体流式增长，由窗口自适应或外层滚动承载。
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(session.turns) { turn in
+                UserBubble(text: turn.question, refs: turn.referencedIndices,
+                           theme: theme, onReferenceTap: onReferenceTap)
+                AIBubble(text: turn.answer, streaming: false, theme: theme)
             }
-            .frame(maxHeight: 220)
-            .onChange(of: session.turns.count) { _ in scrollToBottom(proxy) }
-            .onChange(of: session.streaming?.answer) { _ in scrollToBottom(proxy) }
-            .onChange(of: session.streaming?.stage) { _ in scrollToBottom(proxy) }
+            if let s = session.streaming {
+                UserBubble(text: s.question, refs: s.referencedIndices,
+                           theme: theme, onReferenceTap: onReferenceTap)
+                switch s.stage {
+                case .failed:
+                    FailedBubble(message: s.errorText ?? "回答中断", theme: theme) { session.retry() }
+                case .receiving, .finalizing:
+                    AIBubble(text: s.answer.isEmpty ? "正在回答…" : s.answer,
+                             streaming: true, theme: theme)
+                }
+            }
+            Color.clear.frame(height: 1).id(Self.bottomID)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // onAppear 兜底：内容从「不溢出」增长到「溢出」时，外层带 ScrollViewReader 的树是**新建**的，
+        // 旧树里触发过的 onChange 不会在新树重放 → 新树首次出现时主动滚到底，避免停在顶部（评审中风险）。
+        .onAppear { DispatchQueue.main.async { scrollToBottom() } }   // 延到新树布局后再滚，锚点已就位
+        .onChange(of: session.turns.count) { _ in scrollToBottom() }
+        .onChange(of: session.streaming?.answer) { _ in scrollToBottom() }
+        .onChange(of: session.streaming?.stage) { _ in scrollToBottom() }
     }
 
     private static let bottomID = "followup-bottom"
-    private func scrollToBottom(_ proxy: ScrollViewProxy) {
+    private func scrollToBottom() {
+        guard let proxy = scrollProxy else { return }   // 未溢出（无外层 ScrollView）时窗口自适应显示，无需滚动
         withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
     }
 }
@@ -717,19 +728,17 @@ private struct AIBubble: View {
     let streaming: Bool
     let theme: ReviewTheme
     var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(alignment: .bottom, spacing: 2) {
-                    MarkdownText(raw: text, theme: theme)
-                    if streaming { TypingCursor(theme: theme) }
-                }
-                .padding(.horizontal, 10).padding(.vertical, 7)
-                .background(theme.cardFill.opacity(0.68))
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.cardStroke, lineWidth: theme.borderWidth))
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            }
-            Spacer(minLength: 24)
+        // 固定对齐宽度（user review #3）：AI 气泡统一左对齐、填满可用宽度，不随单次回答长短抖动。
+        HStack(alignment: .bottom, spacing: 2) {
+            MarkdownText(raw: text, theme: theme)
+            if streaming { TypingCursor(theme: theme) }
+            Spacer(minLength: 0)
         }
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(theme.cardFill.opacity(0.68))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.cardStroke, lineWidth: theme.borderWidth))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 
@@ -738,21 +747,20 @@ private struct FailedBubble: View {
     let theme: ReviewTheme
     let onRetry: () -> Void
     var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 6) {
-                Label("回答中断", systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption.bold()).foregroundColor(theme.error)
-                Text(message).font(.caption).foregroundColor(theme.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-                ActionChip(title: "重试", systemImage: "arrow.clockwise",
-                           tint: theme.accent, theme: theme, action: onRetry)
-            }
-            .padding(10)
-            .background(theme.error.opacity(0.08))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.error.opacity(0.3), lineWidth: 1))
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            Spacer(minLength: 24)
+        // 与 AI 气泡同宽（左对齐填满），保持视觉一致（user review #3）。
+        VStack(alignment: .leading, spacing: 6) {
+            Label("回答中断", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption.bold()).foregroundColor(theme.error)
+            Text(message).font(.caption).foregroundColor(theme.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+            ActionChip(title: "重试", systemImage: "arrow.clockwise",
+                       tint: theme.accent, theme: theme, action: onRetry)
         }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(theme.error.opacity(0.08))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.error.opacity(0.3), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 

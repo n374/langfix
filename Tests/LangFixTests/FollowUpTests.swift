@@ -260,13 +260,71 @@ final class FollowUpPureFuncTests: XCTestCase {
         XCTAssertEqual(FollowUpSession.parseReferences("修正 2 和 修正 2 重复"), [2])
     }
 
-    // 序号同源：numberedIssues 编号 = issues 1-based 下标（design D1）。
+    // 序号同源：FollowUpSession.numberedIssues 编号 = ReviewResult.numberedIssues（design D1）。
     @MainActor
     func testNumberedIssuesSameSourceAsIndex() {
         let session = makeSession(result: resultWith(issues: 3), provider: StubFollowUp())
         let nums = session.numberedIssues
         XCTAssertEqual(nums.map { $0.index }, [1, 2, 3])
         XCTAssertEqual(nums[1].before, "b2")   // 第 2 条 = 序号 2
+    }
+
+    // Item1：模型输出 index 构成严格 1..N 排列 → 采用模型序号并按其排序（满足「LLM 输出该格式」）。
+    func testNumberedIssuesUsesValidLLMIndexAndSorts() {
+        // 故意乱序：模型给的 index 与数组顺序不一致，但构成 {1,2,3}。
+        let issues = [
+            Issue(index: 2, category: .grammar, severity: .error, before: "B", after: "b", reasonZh: "r2"),
+            Issue(index: 3, category: .spelling, severity: .improvement, before: "C", after: "c", reasonZh: "r3"),
+            Issue(index: 1, category: .tone, severity: .optional, before: "A", after: "a", reasonZh: "r1"),
+        ]
+        let r = ReviewResult(hasIssues: true, original: "o", corrected: "c", summaryZh: "s", issues: issues)
+        let nums = r.numberedIssues
+        XCTAssertEqual(nums.map { $0.index }, [1, 2, 3], "采用模型序号")
+        XCTAssertEqual(nums.map { $0.issue.before }, ["A", "B", "C"], "按模型序号升序排列")
+    }
+
+    // Item1：模型 index 非法（跳号/重号/缺省）→ 应用按位置重排 1..N（正确性优先，防指错条目）。
+    func testNumberedIssuesFallsBackToPositionOnInvalidLLMIndex() {
+        let dup = [
+            Issue(index: 1, category: .grammar, severity: .error, before: "A", after: "a", reasonZh: "r"),
+            Issue(index: 1, category: .grammar, severity: .error, before: "B", after: "b", reasonZh: "r"),
+        ]
+        XCTAssertEqual(ReviewResult(hasIssues: true, original: "o", corrected: "c", summaryZh: "s", issues: dup)
+            .numberedIssues.map { $0.index }, [1, 2], "重号 → 位置重排")
+        let gap = [
+            Issue(index: 1, category: .grammar, severity: .error, before: "A", after: "a", reasonZh: "r"),
+            Issue(index: 5, category: .grammar, severity: .error, before: "B", after: "b", reasonZh: "r"),
+        ]
+        XCTAssertEqual(ReviewResult(hasIssues: true, original: "o", corrected: "c", summaryZh: "s", issues: gap)
+            .numberedIssues.map { $0.index }, [1, 2], "跳号 → 位置重排")
+        // 缺省（index 0，如旧数据/未输出）→ 位置重排。
+        let missing = [
+            Issue(category: .grammar, severity: .error, before: "A", after: "a", reasonZh: "r"),
+            Issue(category: .grammar, severity: .error, before: "B", after: "b", reasonZh: "r"),
+        ]
+        XCTAssertEqual(ReviewResult(hasIssues: true, original: "o", corrected: "c", summaryZh: "s", issues: missing)
+            .numberedIssues.map { $0.index }, [1, 2], "缺省 index → 位置重排")
+    }
+
+    // Item1：Issue 从 LLM JSON 解码 index；追问上下文用同一序号（同源）。
+    func testIssueDecodesIndexAndFollowUpContextSameSource() {
+        let json = """
+        {"has_issues":true,"original":"o","corrected":"c","summary_zh":"s","issues":[
+          {"index":1,"category":"grammar","severity":"error","before":"A","after":"a","reason_zh":"r1"},
+          {"index":2,"category":"tone","severity":"optional","before":"B","after":"b","reason_zh":"r2"}]}
+        """
+        let r = try! JSONDecoder().decode(ReviewResult.self, from: Data(json.utf8))
+        XCTAssertEqual(r.issues.map { $0.index }, [1, 2], "解码模型 index")
+        // 追问上下文包编号与展示同源。
+        let nums = r.numberedIssues
+        let ctx = FollowUpContext(original: r.original, corrected: r.corrected, summaryZh: r.summaryZh,
+                                  numberedIssues: nums.map { FollowUpContext.NumberedIssue(index: $0.index,
+                                      before: $0.issue.before, after: $0.issue.after,
+                                      category: $0.issue.category.rawValue, severity: $0.issue.severity.rawValue,
+                                      reasonZh: $0.issue.reasonZh) },
+                                  history: [], question: "修正 2 呢")
+        let pkg = Prompt.followUpContext(ctx)
+        XCTAssertTrue(pkg.contains("修正 2：B → b"), "上下文编号与展示序号同源")
     }
 
     // 预算：base 内 → 保留全部；预算收紧 → 丢最旧历史，但 base（含全部带序号修正）恒在。

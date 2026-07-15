@@ -28,8 +28,9 @@
 
 ## 2. 关键设计决策
 
-### D1 · 修正序号：数组下标同源，仅定稿态渲染
-- **序号 = `result.issues` 的 1-based 下标**（`issues.enumerated()` 派生），**不新增存储字段**。UI 显示（「修正 N」）与**发送给 AI 的追问上下文编号**都从同一个 `enumerated()` 派生 → **结构性同源**，从根上杜绝「显示序号≠上下文序号」漂移。
+### D1 · 修正序号：单一来源同源，仅定稿态渲染
+- **序号来源 = `ReviewResult.numberedIssues`（单一解析入口）**。UI 显示（「修正 N」）与**发送给 AI 的追问上下文编号**都读这同一个计算属性 → **结构性同源**，从根上杜绝「显示序号≠上下文序号」漂移。
+- **（开发阶段按用户 review #1 调整）序号由 LLM 输出、应用强校验兜底**：Prompt/schema 要求 LLM 为每条 issue 输出 `index`（满足用户「让 LLM 输出该格式」）；`numberedIssues` 校验——模型 `index` 构成严格 1..N 排列则**采用其编号并按其升序排列**，否则（缺省/跳号/重号/越界）**按数组位置重排 1..N 兜底**（正确性优先，绝不让「修正 N」指错条目）。两条路径都经此单一入口，同源不破。
 - 仅 `.result` 态渲染可引用序号；`.streaming`/`.stopped` 预览态**不**渲染（现状 `StreamingPreviewView` 的 `IssueCard` 本就无序号，保持）。空 `issues` → 无序号。
 - strict 覆盖发生在 `ReviewEngine` 定稿**之前**，定稿后 `issues` 固定 → 序号在结果窗口存续期不漂移。
 - **满足 spec**：`修正稳定序号`（三 Scenario）、`展示结构化修正`(MODIFIED)。
@@ -224,3 +225,4 @@ sequenceDiagram
 | 2026-07-14 | Codex 定稿 §4 UI/交互设计（艺术化、四主题自适应） | Codex（技术方案官整合） |
 | 2026-07-14 | Codex 对抗式评审 1 轮返回 `需改`（5 高 2 中），逐条采纳整合：D6 加应用层输出护栏、D4 加越界引用校验与错误映射/回退语义、D3 修正取消语义分层+强化旧响应隔离、D2 拆 key-free config 快照、UI-7 补 escMonitor 焦点桥接 | 技术方案官 |
 | 2026-07-15 | 开发落地（开发官）：实现 FollowUpSession/AIClient 追问层/Prompt/ReviewView UI + 165 单测。开发阶段 Codex 对抗式评审 3 轮收敛（6→2→0，最终「通过」），额外硬化：①截断(finish=length)/空回答/无完成信号(缺 [DONE] 且缺 finish_reason)一律 fail loud 回退非流式，绝不当完整（新增 `ReviewError.truncated`）；②流式边流边过输出护栏，替代全文不在流式阶段原样露出；③输出护栏加 verbatim 子串检测（单遍替换，防自替换死循环）；④Prompt.sanitizeDelimiter 中和 `<<<RESULT`/`RESULT>>>` delimiter 碰撞；⑤inFlightTask 完成即释放（含 key 的 cfg 不驻留）；⑥IME Esc 改查 field editor `hasMarkedText` 真状态 | 开发官 |
+| 2026-07-15 | 用户 review PR#4 三条修订（开发官）：①序号改由 LLM 输出 `index` + 应用 `ReviewResult.numberedIssues` 强校验兜底同源（D1 更新）；②追问区并入主结果同一滚动流、去内层 `maxHeight:220` 固定容器、自动滚底改外层 `ScrollViewReader` proxy 下传；③AI/失败气泡固定对齐宽度 `maxWidth:.infinity`。+3 单测（168 全绿）。Codex 对抗式评审 2 轮收敛（1中1低→通过） | 开发官 |

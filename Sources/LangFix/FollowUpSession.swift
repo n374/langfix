@@ -48,11 +48,11 @@ final class FollowUpSession: ObservableObject {
         self.keyProvider = keyProvider
     }
 
-    /// 完整带 1-based 序号的修正清单（与 UI「修正 N」同源 —— design D1）。
+    /// 完整带序号的修正清单（与 UI「修正 N」同源 —— design D1；序号来源 = ReviewResult.numberedIssues 单一解析）。
     var numberedIssues: [FollowUpContext.NumberedIssue] {
-        boundResult.issues.enumerated().map { (i, issue) in
+        boundResult.numberedIssues.map { (idx, issue) in
             FollowUpContext.NumberedIssue(
-                index: i + 1, before: issue.before, after: issue.after,
+                index: idx, before: issue.before, after: issue.after,
                 category: issue.category.rawValue, severity: issue.severity.rawValue,
                 reasonZh: issue.reasonZh)
         }

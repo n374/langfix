@@ -31,7 +31,8 @@ enum Prompt {
         - corrected: string（最小改动修正版）
         - translation_zh: string（corrected 的简体中文直译，帮助中文母语用户核对修正后的意思是否与本意一致；若 corrected 本身已是中文则原样返回或给一句等义中文）
         - summary_zh: string（一句话中文总评）
-        - issues: array of { category, severity, before, after, reason_zh }
+        - issues: array of { index, category, severity, before, after, reason_zh }
+          - index: 整数，从 1 开始逐条递增的修正序号（第一条为 1、第二条为 2…），**连续、不重复、不跳号**；用户会用「修正 N」引用它，务必与该条一一对应
           - category ∈ grammar|spelling|word_choice|naturalness|tone|punctuation
           - severity ∈ error|improvement|optional
         - alternative: string（可选，更地道的整体改写，明确是非最小改动版；无则省略或空字符串）
@@ -48,7 +49,7 @@ enum Prompt {
     }
 
     static let repairHint = """
-    你上一条回复不是合法 JSON 或缺字段。请只输出一个符合要求的 JSON 对象（字段：has_issues, original, corrected, summary_zh, issues[{category,severity,before,after,reason_zh}], 可选 alternative），不要任何多余文字。
+    你上一条回复不是合法 JSON 或缺字段。请只输出一个符合要求的 JSON 对象（字段：has_issues, original, corrected, summary_zh, issues[{index,category,severity,before,after,reason_zh}]，其中 index 为从 1 起连续递增的修正序号；可选 alternative），不要任何多余文字。
     """
 
     // MARK: - 追问答疑（ai-followup change · design D4）
@@ -125,6 +126,7 @@ enum Prompt {
                         "type": "object",
                         "additionalProperties": false,
                         "properties": [
+                            "index": ["type": "integer"],
                             "category": ["type": "string",
                                          "enum": ["grammar", "spelling", "word_choice", "naturalness", "tone", "punctuation"]],
                             "severity": ["type": "string",
@@ -133,7 +135,7 @@ enum Prompt {
                             "after": ["type": "string"],
                             "reason_zh": ["type": "string"],
                         ],
-                        "required": ["category", "severity", "before", "after", "reason_zh"],
+                        "required": ["index", "category", "severity", "before", "after", "reason_zh"],
                     ],
                 ],
                 "alternative": ["type": "string"],
