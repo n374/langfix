@@ -362,4 +362,13 @@ enum ReviewError: LocalizedError, Sendable {
 
 extension String {
     var trimmed: String { trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// 把各种换行统一为 LF（`\n`）：CRLF、CR、Unicode 行分隔符(U+2028)/段分隔符(U+2029)。
+    /// 用于输入边界规范化与换行结构检测，使跨来源（Windows/老 Mac/富文本）换行一致可比（Adj3 闭环，评审复审）。
+    var normalizedLineEndings: String {
+        replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{2028}", with: "\n")
+            .replacingOccurrences(of: "\u{2029}", with: "\n")
+    }
 }

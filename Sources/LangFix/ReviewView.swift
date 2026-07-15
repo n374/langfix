@@ -21,19 +21,21 @@ struct ReviewView: View {
 
     private var theme: ReviewTheme { settings.reviewTheme }
 
+    private var isResultPhase: Bool { if case .result = state.phase { return true } else { return false } }
+
     var body: some View {
         Group {
-            if isOverflowing {
-                // 超上限走整体滚动；追问对话已并入主内容流（不再有内层固定高度容器），
-                // 由这里的 ScrollViewReader 承载「新问答自动滚到底」（proxy 下传给追问区）。
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        content(scrollProxy: proxy)
-                    }
-                    .frame(maxHeight: maxContentSize.height, alignment: .topLeading)
+            if isResultPhase {
+                // 结果态：ResultView 自管「中部内容滚动 + 底部输入/按钮栏固定」（user adj#1），故不再套外层 ScrollView。
+                content(overflow: isOverflowing)
+            } else if isOverflowing {
+                // 其余态超上限走整体滚动（无追问输入栏，footer 简单，随内容滚动即可）。
+                ScrollView {
+                    content(overflow: false)
                 }
+                .frame(maxHeight: maxContentSize.height, alignment: .topLeading)
             } else {
-                content(scrollProxy: nil)
+                content(overflow: false)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -42,8 +44,8 @@ struct ReviewView: View {
         .animation(.easeOut(duration: theme.animationDuration), value: theme.id)
     }
 
-    private func content(scrollProxy: ScrollViewProxy?) -> some View {
-        ReviewContent(state: state, theme: theme, scrollProxy: scrollProxy)
+    private func content(overflow: Bool) -> some View {
+        ReviewContent(state: state, theme: theme, isOverflowing: overflow, maxContentSize: maxContentSize)
             .frame(maxWidth: maxContentSize.width, alignment: .leading)
     }
 }
@@ -73,8 +75,9 @@ struct ReviewMeasurementView: View {
 private struct ReviewContent: View {
     @ObservedObject var state: ReviewState
     let theme: ReviewTheme
-    /// 外层 ScrollView 的 proxy（仅 overflow 显示态有值）：供追问区自动滚到底。measurement 态为 nil。
-    var scrollProxy: ScrollViewProxy? = nil
+    /// 结果态是否溢出上限（决定 ResultView 是否启用「中部滚动 + 底栏固定」）。measurement 态恒 false（测自然尺寸）。
+    var isOverflowing: Bool = false
+    var maxContentSize: CGSize = CGSize(width: ReviewWindowSizing.minWidth, height: 700)
 
     @ViewBuilder var body: some View {
         switch state.phase {
@@ -97,7 +100,8 @@ private struct ReviewContent: View {
                       onHide: { state.onHide?() },
                       onClose: { state.onClose?() })
         case .result(let result):
-            ResultView(state: state, result: result, theme: theme, scrollProxy: scrollProxy,
+            ResultView(state: state, result: result, theme: theme,
+                       isOverflowing: isOverflowing, maxContentSize: maxContentSize,
                        onHide: { state.onHide?() },
                        onClose: { state.onClose?() })
         }
@@ -354,7 +358,8 @@ private struct ResultView: View {
     @ObservedObject var state: ReviewState
     let result: ReviewResult
     let theme: ReviewTheme
-    var scrollProxy: ScrollViewProxy? = nil
+    var isOverflowing: Bool = false
+    var maxContentSize: CGSize = CGSize(width: ReviewWindowSizing.minWidth, height: 700)
     let onHide: () -> Void
     let onClose: () -> Void
 
@@ -369,6 +374,28 @@ private struct ResultView: View {
     private var segs: [DiffEngine.Seg] { DiffEngine.segments(input, result.corrected) }
 
     var body: some View {
+        if isOverflowing {
+            // 溢出：中部内容滚动、底部输入/按钮栏固定在窗口底部（user adj#1）。
+            VStack(spacing: 0) {
+                ScrollViewReader { proxy in
+                    ScrollView { scrollableBody(proxy: proxy) }
+                }
+                Divider()
+                footer
+            }
+            .frame(maxHeight: maxContentSize.height, alignment: .topLeading)
+        } else {
+            // 未溢出：窗口自适应贴合内容，footer 天然在底部，无需滚动。
+            VStack(spacing: 0) {
+                scrollableBody(proxy: nil)
+                Divider()
+                footer
+            }
+        }
+    }
+
+    /// 可滚动的主体（结果内容 + 追问对话），不含底部输入/按钮栏。
+    private func scrollableBody(proxy: ScrollViewProxy?) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
@@ -382,13 +409,13 @@ private struct ResultView: View {
                     alternativeBlock(alt, reason: result.alternativeReasonZh)
                 }
                 if let session = state.followUp {
-                    followUpArea(session)
+                    followUpArea(session, proxy: proxy)
                 }
             }
             .padding(14)
-            Divider()
-            footer
         }
+        // 结果区所有文字可选中复制（user adj#4）；footer 的输入框/按钮不在此子树，不受影响。
+        .textSelection(.enabled)
     }
 
     // MARK: 子区块
@@ -471,7 +498,7 @@ private struct ResultView: View {
     // MARK: 追问区（ai-followup change · design §4 UI-1..UI-6）
 
     @ViewBuilder
-    private func followUpArea(_ session: FollowUpSession) -> some View {
+    private func followUpArea(_ session: FollowUpSession, proxy: ScrollViewProxy?) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Rectangle().fill(theme.cardStroke.opacity(0.55)).frame(height: 1)
             HStack(spacing: 6) {
@@ -482,7 +509,7 @@ private struct ResultView: View {
             .foregroundColor(theme.secondaryText).opacity(0.72)
             if !session.turns.isEmpty || session.streaming != nil {
                 // 并入主结果同一滚动流（无内层固定高度容器）；自动滚底由外层 scrollProxy 承载（user review #2）。
-                FollowUpConversation(session: session, theme: theme, scrollProxy: scrollProxy,
+                FollowUpConversation(session: session, theme: theme, scrollProxy: proxy,
                                      onReferenceTap: { highlightPulse($0) })
             }
         }
@@ -801,7 +828,8 @@ private struct IssueCard: View {
     let theme: ReviewTheme
     /// 1-based 稳定序号（design D1）。`nil` = 流式预览态，不渲染可引用序号（spec「预览期不开放序号」）。
     var index: Int? = nil
-    /// 点击卡片把「修正 N」注入追问输入框（design UI-3）。仅 `.result` 态提供。
+    /// 点击卡片右上「引用」按钮把「修正 N」注入追问输入框（design UI-3；user adj#4 改为显式按钮，
+    /// 让卡片正文文字可自由选中复制，不被整卡 tap 抢走选择手势）。仅 `.result` 态提供。
     var onReference: ((Int) -> Void)? = nil
     /// 被引用高亮（design UI-3）：命中时描边加亮 + glow。
     var highlighted: Bool = false
@@ -828,9 +856,15 @@ private struct IssueCard: View {
                     .font(.caption2)
                     .foregroundColor(severityColor)
                 Spacer()
-                if index != nil, hovering {
-                    Image(systemName: "quote.bubble")
-                        .font(.caption2).foregroundColor(theme.accent.opacity(0.8))
+                // 引用改为显式按钮（user adj#4）：卡片正文文字要可选中复制，不能再让「整卡 tap」抢走选择手势。
+                if let index, let onReference {
+                    Button { onReference(index) } label: {
+                        Image(systemName: "quote.bubble")
+                            .font(.caption2)
+                            .foregroundColor(theme.accent.opacity(hovering ? 1 : 0.7))
+                    }
+                    .buttonStyle(.plain)
+                    .help("在追问中引用「修正 \(index)」")
                 }
             }
             HStack(spacing: 4) {
@@ -850,9 +884,7 @@ private struct IssueCard: View {
         )
         .shadow(color: theme.glow.opacity(highlighted ? theme.glowOpacity : 0), radius: highlighted ? 10 : 0)
         .cornerRadius(6)
-        .contentShape(RoundedRectangle(cornerRadius: 6))
         .onHover { if index != nil { hovering = $0 } }
-        .onTapGesture { if let index, let onReference { onReference(index) } }
         .animation(.easeOut(duration: 0.2), value: highlighted)
     }
 

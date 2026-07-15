@@ -35,7 +35,9 @@ final class AppCoordinator {
             presentConfigNeeded(cfg.missingFields)
             return
         }
-        let input = rawText.trimmed
+        // 先规范化内部换行为 LF（CRLF/CR/U+2028/U+2029），再去首尾空白：使发给模型的原文、diff 基线、
+        // 换行结构检测三者换行一致可比，杜绝跨来源换行差异导致的丢换行漏检（Adj3 闭环）。
+        let input = rawText.normalizedLineEndings.trimmed
         guard !input.isEmpty else { return }
         if input.count > cfg.maxChars {
             present(error: "文本过长（\(input.count) 字符，上限 \(cfg.maxChars)）")
