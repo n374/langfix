@@ -48,14 +48,42 @@ final class ReviewEngine: Sendable {
         return result
     }
 
-    /// 换行结构是否被破坏：原文含换行、而 corrected 的换行数**变少**（合并成一行 / 删空行）。
-    /// 纯计数启发式，用于「多行输入被规范化」的闭环检测（Adj2/Adj3）。原文无换行则恒 false。
-    /// 两侧都先规范化换行（CRLF/CR/U+2028/U+2029→LF），使模型返回 CRLF 等异体换行时也能正确比对（评审复审）。
+    /// 换行结构是否被破坏：原文含内部换行、而 corrected 的**行结构收缩**（合并成更少行 / 删空行）。
+    /// 用于「多行输入被规范化」的闭环检测（Adj2/Adj3）。原文无内部换行则恒 false。
+    ///
+    /// **按结构比、不按总数比，且双指标防补偿绕过（MR 门禁两轮修复）**：先规范化换行（CRLF/CR/U+2028/U+2029→LF）。
+    /// 单一计数任何单指标都能被「一处减、别处补」抵消，故同时比两个正交结构指标，任一收缩即判 collapsed：
+    /// - **内部换行数**（去首尾空白/换行后数 `\n`）变少 → 捕获「删空行」「合并+末尾补换行」（末尾补被裁掉不抵消）。
+    /// - **非空行数**（trim 后非空的行数）变少 → 捕获「合并两行 + 别处补空行」（补的是**空**行，不增非空行数，无法抵消）。
+    /// 两者正交：要同时保住两个指标又合并了行，需在别处**拆分一条非空行**（等于新增内部换行、属另一类过度改动），
+    /// 非真实校对行为。即便词 token 不变（`editedWords=0`、ratio=0）、纯空白/换行改动，只要行结构收缩也能被检出
+    /// （配合护栏触发条件 `|| lostNL0` 无视短句豁免与 ratio）。
+    ///
+    /// **明确作用域（非隐藏取舍）**：本检测的目标是「**行结构收缩**（合并成更少行 / 删行）」——即用户反馈的
+    /// 「换行丢失、多行被并成一行」失效模式。**不覆盖「行数不变的换行位置重排」**（如 `a\nb c`→`a b\nc`：
+    /// 行数、内部换行数、每行词数多集皆不变，仅断行位置平移）。原因：①它不是用户反馈的失效模式；②结果**如实展示**
+    /// 且词级 diff 准确（非「错误数据当成功」，主结果正确性不受影响）；③robust 检测位置重排需按内容对齐（在模型
+    /// 同时改词时判定哪个词属哪行），易误判**合法的逐行最小改动**为违规 → 反而给好结果乱标 overEdited。故按作用域
+    /// 只做收缩检测；若产品需要「断行位置逐位保真」，属更强需求，需另做内容对齐方案并接受其误判权衡（留给用户拍板）。
     static func collapsedNewlines(orig: String, corrected: String) -> Bool {
-        let o = orig.normalizedLineEndings.reduce(0) { $1 == "\n" ? $0 + 1 : $0 }
-        guard o > 0 else { return false }
-        let c = corrected.normalizedLineEndings.reduce(0) { $1 == "\n" ? $0 + 1 : $0 }
-        return c < o
+        let oInternal = internalNewlineCount(orig)
+        guard oInternal > 0 else { return false }
+        if internalNewlineCount(corrected) < oInternal { return true }
+        if nonEmptyLineCount(corrected) < nonEmptyLineCount(orig) { return true }
+        return false
+    }
+
+    /// 内部换行数：规范化换行 → 去掉首尾空白与换行（防「末尾补偿换行」绕过）→ 数剩余 `\n`。
+    static func internalNewlineCount(_ s: String) -> Int {
+        let t = s.normalizedLineEndings.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.reduce(0) { $1 == "\n" ? $0 + 1 : $0 }
+    }
+
+    /// 非空行数：规范化换行 → 按 `\n` 切行 → 数 trim 后非空的行（空行不计，故「补空行」无法抬高此指标）。
+    static func nonEmptyLineCount(_ s: String) -> Int {
+        s.normalizedLineEndings
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .reduce(0) { $1.trimmingCharacters(in: .whitespaces).isEmpty ? $0 : $0 + 1 }
     }
 
     /// 在 firstPass 与 strict 两版里选更优：**保留换行**优先，其次改动比例更小。
