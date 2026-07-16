@@ -263,6 +263,9 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
     private let capsuleContainer = NSView()
     private var escMonitor: Any?
     private var stateChangeCancellable: AnyCancellable?
+    /// 订阅嵌套的 `state.followUp`（FollowUpSession，独立 ObservableObject）变化 → 驱动窗口重测量/封顶。
+    /// 追问增长挂在 session 上、不会触发 `state.objectWillChange`，故必须单独订阅（user adj：高度未封顶 bug 根因）。
+    private var followUpChangeCancellable: AnyCancellable?
     private var preferredScreen: NSScreen?
 
     private let sizing = ReviewWindowSizing()
@@ -297,8 +300,15 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         )
         super.init()
         stateChangeCancellable = state.objectWillChange.sink { [weak self] _ in
-            DispatchQueue.main.async { self?.refreshMeasurement() }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                // followUp 会话在 .result 时才注入（@Published → 此 sink 触发）：注入后订阅其变化，
+                // 使**追问增长**（追加一轮 / 流式增量）也走一遍 remeasure → applyResize 封顶 + isOverflowing 翻转。
+                self.observeFollowUpIfNeeded()
+                self.refreshMeasurement()
+            }
         }
+        observeFollowUpIfNeeded()
         // 「隐藏」按钮（现位于弹窗底部操作栏）→ 折叠为胶囊，与旧标题栏隐藏图标同一 .hideIcon 事件。
         state.onHide = { [weak self] in self?.handle(.hideIcon) }
         configurePanels()
@@ -403,6 +413,16 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         ]
         NSLayoutConstraint.activate(measurementConstraints)
         refreshMeasurement()
+    }
+
+    /// 若当前 `state.followUp` 已注入且尚未订阅，则订阅其 `objectWillChange`：追问每次增长（追加一轮 / 流式增量 /
+    /// stage 变化 / 取消清空）都触发 `refreshMeasurement` → `updateNaturalSize`（isOverflowing 翻转）→ `applyResize`
+    /// （高度 clamp 到 maxH）。杜绝「追问越加越高、窗口超过屏幕」（user adj：最大高度未限制住）。
+    private func observeFollowUpIfNeeded() {
+        guard followUpChangeCancellable == nil, let session = state.followUp else { return }
+        followUpChangeCancellable = session.objectWillChange.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.refreshMeasurement() }
+        }
     }
 
     private func refreshMeasurement() {
@@ -739,6 +759,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
     func close() {
         if let m = escMonitor { NSEvent.removeMonitor(m); escMonitor = nil }
         stateChangeCancellable = nil
+        followUpChangeCancellable = nil
         machineState.presentation = .closed
         for p in [expandedPanel, capsulePanel] {
             p.delegate = nil

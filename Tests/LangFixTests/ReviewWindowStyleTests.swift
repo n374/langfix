@@ -359,6 +359,41 @@ final class ReviewWindowStyleTests: XCTestCase {
         return last
     }
 
+    /// user adj 回归：追问不断增长时，窗口高度必须**封顶在 maxH** 并翻 `isOverflowing`（中部滚动、底栏固定），
+    /// 绝不随追问越加越高超过屏幕。走**生产路径**（`session.objectWillChange → refreshMeasurement`），
+    /// 不调 `measureAndApplyForTesting` 强制测量——只有订阅了嵌套 followUp 会话，本测试才通过（根因回归）。
+    @MainActor
+    func testFollowUpGrowthCapsWindowHeightViaProductionPath() {
+        _ = NSApplication.shared
+        let state = ReviewState()
+        // 短主结果：只有追问增长把内容推过 maxH，隔离验证「追问驱动的封顶/溢出」。
+        let result = ReviewResult(hasIssues: false, original: "short", corrected: "short", summaryZh: "", issues: [])
+        state.phase = .result(result)
+        let stub = StubFollowUp()
+        stub.answer = Self.streamingText(lines: 24)   // 每轮长回答，少数几轮即累积超过 maxH（省重测量开销）
+        let snap = FollowUpConfigSnapshot(baseURL: "https://example.test/v1", model: "m",
+                                          temperature: 0.2, streamingEnabled: true, followUpBudgetTokens: 1_000_000)
+        let session = FollowUpSession(boundResult: result, configSnapshot: snap, provider: stub, keyProvider: { "k" })
+        state.followUp = session
+
+        let controller = ReviewWindowController(state: state, behavior: .normal)
+        controller.showCentered()
+        defer { controller.close() }
+        settleMainRunLoop()
+
+        // 追加几轮长回答；每轮走生产路径（settleMainRunLoop 泵出 ask 的 Task → 追加 turn → session 变化 → 重测量）。
+        for i in 0..<4 {
+            session.ask("问题 \(i)：这条追问用于把窗口内容不断撑高，验证是否封顶。")
+            settleMainRunLoop()
+        }
+        settleMainRunLoop()
+
+        XCTAssertGreaterThanOrEqual(session.turns.count, 3, "多轮追问应已入历史（撑高内容）")
+        let s = controller.measurementSnapshotForTesting()
+        XCTAssertTrue(s.isOverflowing, "追问累积超过 maxH 后必翻 isOverflowing（否则窗口无上限增长超屏）")
+        XCTAssertEqual(s.appliedContent.height, s.maxContent.height, accuracy: 2, "窗口内容高度必须封顶在 maxH")
+    }
+
     private static func streamingText(lines: Int) -> String {
         (1...lines)
             .map { "Line \($0): This sentence keeps the streaming preview tall enough for measurement." }
