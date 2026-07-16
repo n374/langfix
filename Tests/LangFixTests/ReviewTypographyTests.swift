@@ -122,11 +122,11 @@ final class ReviewTypographyTests: XCTestCase {
         _ = NSApplication.shared
         let store = SettingsStore.shared
         let original = store.reviewFontTierRaw
-        // key 原本显式存在则恢复原值即可（didSet 落盘）；原本不存在才删，避免抹掉本机既有设置
-        let hadKey = UserDefaults.standard.object(forKey: "reviewFontTier") != nil
+        // 持久层原本显式存在则恢复原值即可（didSet 落盘）；原本不存在才删，避免抹掉/伪造本机设置
+        let hadPersistedKey = Self.persistedFontTierRaw() != nil
         defer {
             store.reviewFontTierRaw = original
-            if !hadKey { UserDefaults.standard.removeObject(forKey: "reviewFontTier") }
+            if !hadPersistedKey { UserDefaults.standard.removeObject(forKey: "reviewFontTier") }
         }
         store.reviewFontTierRaw = ReviewFontTier.standard.rawValue
 
@@ -163,16 +163,25 @@ final class ReviewTypographyTests: XCTestCase {
 
     // MARK: 工具
 
-    /// 暂改共享 store 的档位执行测量，测后恢复原值；落盘 key 仅在原本不存在时清理（不抹本机既有设置）。
+    /// 仅读持久层的落盘值（`object(forKey:)` 会合并 `register` 的默认值，不能用于判断 key 是否真实落盘）。
+    /// bundleIdentifier 缺失时保守视为「存在」（返回合并值）——宁可残留与测前一致的值，也不误删本机设置。
+    private static func persistedFontTierRaw() -> String? {
+        guard let domain = Bundle.main.bundleIdentifier else {
+            return UserDefaults.standard.string(forKey: "reviewFontTier")
+        }
+        return UserDefaults.standard.persistentDomain(forName: domain)?["reviewFontTier"] as? String
+    }
+
+    /// 暂改共享 store 的档位执行测量，测后恢复原值；落盘 key 仅在原本未落盘时清理（不抹本机既有设置）。
     @MainActor
     private static func withTier<T>(_ tier: ReviewFontTier, _ body: () -> T) -> T {
         let store = SettingsStore.shared
         let original = store.reviewFontTierRaw
-        let hadKey = UserDefaults.standard.object(forKey: "reviewFontTier") != nil
+        let hadPersistedKey = persistedFontTierRaw() != nil
         store.reviewFontTierRaw = tier.rawValue
         defer {
             store.reviewFontTierRaw = original
-            if !hadKey { UserDefaults.standard.removeObject(forKey: "reviewFontTier") }
+            if !hadPersistedKey { UserDefaults.standard.removeObject(forKey: "reviewFontTier") }
         }
         return body()
     }
