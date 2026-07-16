@@ -442,46 +442,33 @@ final class FollowUpPureFuncTests: XCTestCase {
                       "请求体回解后原始换行完整无损")
     }
 
-    // Adj3 闭环：collapsedNewlines 按**内部结构**检测（原文有内部换行、corrected 内部换行变少 → true）。
+    // Adj3 闭环（用户 2026-07-16 验收标准）：collapsedNewlines 按**非空内容行数**检测——
+    // 内容换行必须保留（内容行被合并 → 判破坏）；多个空行合并成单行可接受（非空行数不变 → 不判）。
     func testCollapsedNewlinesDetection() {
-        XCTAssertTrue(ReviewEngine.collapsedNewlines(orig: "a\nb\nc", corrected: "a b c"), "多行被合并成一行")
-        XCTAssertTrue(ReviewEngine.collapsedNewlines(orig: "a\n\nb", corrected: "a\nb"), "空行被删")
-        XCTAssertFalse(ReviewEngine.collapsedNewlines(orig: "a\nb", corrected: "a\nb"), "换行保留")
-        XCTAssertFalse(ReviewEngine.collapsedNewlines(orig: "single line", corrected: "single lines"), "原文无换行不判")
-        // 异体换行（CRLF / CR / U+2028）也计为逻辑换行，合并成一行仍触发（评审复审边界）。
-        XCTAssertTrue(ReviewEngine.collapsedNewlines(orig: "a\r\nb\r\nc", corrected: "a b c"), "CRLF 合并被检出")
-        XCTAssertTrue(ReviewEngine.collapsedNewlines(orig: "a\rb", corrected: "a b"), "CR 合并被检出")
-        XCTAssertTrue(ReviewEngine.collapsedNewlines(orig: "a\u{2028}b", corrected: "a b"), "U+2028 合并被检出")
-        // 模型把 LF 原文回成 CRLF（换行数不减）→ 不误判。
+        // 内容行被合并 → 必判破坏。
+        XCTAssertTrue(ReviewEngine.collapsedNewlines(orig: "a\nb\nc", corrected: "a b c"), "多行内容被合并成一行")
+        XCTAssertTrue(ReviewEngine.collapsedNewlines(orig: "a\nb", corrected: "a b"), "两行内容并成一行")
+        // ✅ 用户明确「多个空行合并成单行可接受」→ 空行收缩不报警（非空行数不变）。
+        XCTAssertFalse(ReviewEngine.collapsedNewlines(orig: "a\n\nb", corrected: "a\nb"), "删一个空行(内容行不变) → 可接受、不判")
+        XCTAssertFalse(ReviewEngine.collapsedNewlines(orig: "a\n\n\nb", corrected: "a\nb"), "多空行压成单换行 → 可接受、不判")
+        XCTAssertFalse(ReviewEngine.collapsedNewlines(orig: "a\n\n\nb", corrected: "a\n\nb"), "空行数减少但内容行不变 → 不判")
+        // 结构保留 → 不判。
+        XCTAssertFalse(ReviewEngine.collapsedNewlines(orig: "a\nb", corrected: "a\nb"), "内容换行保留")
+        XCTAssertFalse(ReviewEngine.collapsedNewlines(orig: "single line", corrected: "single lines"), "单行内容不判")
+        // 异体换行（CRLF / CR / U+2028）归一后同样按内容行判。
+        XCTAssertTrue(ReviewEngine.collapsedNewlines(orig: "a\r\nb\r\nc", corrected: "a b c"), "CRLF 内容合并被检出")
+        XCTAssertTrue(ReviewEngine.collapsedNewlines(orig: "a\rb", corrected: "a b"), "CR 内容合并被检出")
+        XCTAssertTrue(ReviewEngine.collapsedNewlines(orig: "a\u{2028}b", corrected: "a b"), "U+2028 内容合并被检出")
         XCTAssertFalse(ReviewEngine.collapsedNewlines(orig: "a\nb", corrected: "a\r\nb"), "异体换行回写不误判")
 
-        // 🔴 MR 门禁绕过用例（补偿换行不得抵消）：
-        // ① 合并内部换行 + 末尾补一处换行（总数相等）→ 仍必判 collapsed（内部换行 1→0）。
-        XCTAssertTrue(ReviewEngine.collapsedNewlines(orig: "a\nb", corrected: "a b\n"),
-                      "合并成一行 + 末尾补换行：内部换行减少必检出，补偿换行不得抵消")
-        // ② 删段落空行 + 末尾补一处换行（总数相等 2）→ 仍必判 collapsed（内部换行 2→1）。
-        XCTAssertTrue(ReviewEngine.collapsedNewlines(orig: "a\n\nb", corrected: "a\nb\n"),
-                      "删空行 + 末尾补换行：内部结构变少必检出")
-        // 结构保留 + 末尾补换行 → 不误判（内部换行不减）。
-        XCTAssertFalse(ReviewEngine.collapsedNewlines(orig: "a\nb", corrected: "a\nb\n"), "仅末尾补换行、结构不变 → 不判")
-        XCTAssertFalse(ReviewEngine.collapsedNewlines(orig: "a\n\nb", corrected: "a\n\nb\n"), "结构不变 + 尾补 → 不判")
-
-        // 🔴 MR 门禁 R2 绕过（合并两行 + 别处补**空行**使内部换行总数相等）→ 非空行数变少必检出。
-        XCTAssertTrue(ReviewEngine.collapsedNewlines(orig: "a\nb\nc", corrected: "a b\n\nc"),
-                      "合并 a/b + 补空行(内部换行数仍 2) → 非空行 3→2 必检出")
-        XCTAssertTrue(ReviewEngine.collapsedNewlines(orig: "a\nb\nc\nd", corrected: "a b c\n\n\nd"),
-                      "合并三行 + 补两空行 → 非空行 4→2 必检出")
-        // 真·结构保留（各行内最小改动）→ 不误判。
-        XCTAssertFalse(ReviewEngine.collapsedNewlines(orig: "a\nb\nc", corrected: "a1\nb1\nc1"),
-                       "逐行最小改动、行结构不变 → 不判")
-    }
-
-    // internalNewlineCount：去首尾空白/换行后数内部 \n。
-    func testInternalNewlineCount() {
-        XCTAssertEqual(ReviewEngine.internalNewlineCount("a\nb\n"), 1, "末尾换行不计入内部")
-        XCTAssertEqual(ReviewEngine.internalNewlineCount("\n\na\nb\n\n"), 1, "首尾换行都不计入")
-        XCTAssertEqual(ReviewEngine.internalNewlineCount("a b c"), 0)
-        XCTAssertEqual(ReviewEngine.internalNewlineCount("a\r\nb"), 1, "CRLF 归一为一处内部换行")
+        // 补偿换行/补空行绕过：非空行数结构性免疫（补的都是空行，不增非空行数）。
+        XCTAssertTrue(ReviewEngine.collapsedNewlines(orig: "a\nb", corrected: "a b\n"), "合并 + 末尾补换行仍判")
+        XCTAssertTrue(ReviewEngine.collapsedNewlines(orig: "a\nb\nc", corrected: "a b\n\nc"), "合并 a/b + 补空行 → 非空行 3→2 必判")
+        XCTAssertTrue(ReviewEngine.collapsedNewlines(orig: "a\nb\nc\nd", corrected: "a b c\n\n\nd"), "合并三行 + 补空行 → 4→2 必判")
+        // 仅末尾补换行、内容行不变 → 不误判。
+        XCTAssertFalse(ReviewEngine.collapsedNewlines(orig: "a\nb", corrected: "a\nb\n"), "仅末尾补换行、内容行不变 → 不判")
+        // 逐行最小改动、内容行不变 → 不误判。
+        XCTAssertFalse(ReviewEngine.collapsedNewlines(orig: "a\nb\nc", corrected: "a1\nb1\nc1"), "逐行最小改动、行结构不变 → 不判")
     }
 
     // nonEmptyLineCount：空行不计（故补空行无法抬高此指标）。
@@ -489,6 +476,7 @@ final class FollowUpPureFuncTests: XCTestCase {
         XCTAssertEqual(ReviewEngine.nonEmptyLineCount("a\nb\nc"), 3)
         XCTAssertEqual(ReviewEngine.nonEmptyLineCount("a b\n\nc"), 2, "空行不计")
         XCTAssertEqual(ReviewEngine.nonEmptyLineCount("a\n  \nb"), 2, "全空白行不计")
+        XCTAssertEqual(ReviewEngine.nonEmptyLineCount("a\n\n\nb"), 2, "多空行仍只 2 个非空内容行")
         XCTAssertEqual(ReviewEngine.nonEmptyLineCount("single"), 1)
     }
 
@@ -573,15 +561,15 @@ final class ReviewEngineNewlineTests: XCTestCase {
         XCTAssertTrue(r.overEdited, "strict 仍破坏结构 → overEdited，不静默当干净")
     }
 
-    // 🔴 删段落空行 + 末尾补换行（纯空白结构改动、editedWords≈0）也必触发。
-    func testDeleteBlankLineWithTrailingStillTriggers() async throws {
-        let input = "Dear team,\n\nI have went there.\n\nBest"     // 含段落空行
-        let collapsed = "Dear team,\nI have went there.\nBest\n"   // 删空行 + 尾补换行
-        let stub = StubProvider(first: collapsed, strict: collapsed)
+    // ✅ 用户验收：删段落空行、内容行全保留（多空行合并可接受）→ **不**触发换行护栏、不 overEdited。
+    func testBlankLineCollapseIsAcceptable() async throws {
+        let input = "Dear team,\n\nI have went there.\n\nBest"     // 3 内容行 + 段落空行
+        let noBlank = "Dear team,\nI have went there.\nBest"       // 删掉段落空行，3 内容行不变
+        let stub = StubProvider(first: noBlank, strict: noBlank)
         let engine = ReviewEngine(client: stub)
         let r = try await engine.review(text: input, config: testConfig())
-        XCTAssertEqual(stub.calls, ["firstPass", "strict"], "删空行 + 补偿换行仍触发")
-        XCTAssertTrue(r.overEdited)
+        XCTAssertEqual(stub.calls, ["firstPass"], "空行收缩、内容行不变 → 不触发换行护栏，不重试")
+        XCTAssertFalse(r.overEdited, "空行合并可接受，不标 overEdited")
     }
 
     // 🔴 MR R2 绕过：合并两行 + 别处补空行（内部换行总数相等）→ 非空行数变少必触发。
