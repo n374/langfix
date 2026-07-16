@@ -19,14 +19,14 @@ THE SYSTEM SHALL 在设置页提供「字号」配置项，其值写入 UserDefa
 - **WHEN** 渲染结果浮窗正文
 - **THEN** 正文字号严格大于本 change 前的正文基准字号（以基准锚点断言，不依赖具体 pt 硬值）
 
-**覆盖测试**: TBD(unit: 未设置时的默认正文字号 → 断言 > 记录的旧正文基准锚点)
+**覆盖测试**: `Tests/LangFixTests/ReviewTypographyTests.swift` — `testDefaultTierIsLargeWhenAbsent`（register 默认 → 未设置时档位 = 大）、`testDefaultTierBodyExceedsLegacyBaseline`（默认档正文 > `ReviewTypography.legacyBodyBaseline`）
 
 #### Scenario: 用户调整并持久化
 - **GIVEN** 用户在设置中改字号
 - **WHEN** 保存后重启 App
 - **THEN** 新字号档位被持久化并生效
 
-**覆盖测试**: TBD(unit: 写字号 → 重读断言持久化)
+**覆盖测试**: `Tests/LangFixTests/ReviewTypographyTests.swift` — `testTierPersistsAcrossReload`（独立 suite 写 rawValue → 重读还原）、`testInvalidRawValueFallsBackToLarge`（非法 rawValue fallback 默认）
 
 ### Requirement: 字号即时生效与窗口自适应联动
 WHEN 用户变更字号配置 THE SYSTEM SHALL 使结果浮窗文本区（修正结果 / 词级 diff / issue 卡片 / 追问气泡 / 总评 / 直译等）按新字号缩放，并触发一次窗口重测量；WHERE 放大后自然内容高度超过 `maxH` THE SYSTEM SHALL 维持既有封顶行为（高度封顶 `maxH`、中部滚动、底栏固定），不超出屏幕。
@@ -38,14 +38,14 @@ WHEN 用户变更字号配置 THE SYSTEM SHALL 使结果浮窗文本区（修正
 - **WHEN** 用户把字号调大
 - **THEN** 结果 / issue / 追问气泡等文本字号随之增大
 
-**覆盖测试**: TBD(ui: 改字号 → 断言文本区字号缩放)
+**覆盖测试**: `Tests/LangFixTests/ReviewTypographyTests.swift` — `testXLargeLongContentMeasuresTallerAndCapsAtMaxH`（同一内容 xLarge 档测量自然高显著大于 standard，即文本区随档位缩放的可测代理）+ 4 档手动走查（design §7-6）
 
 #### Scenario: 大字号 + 长内容仍封顶不超屏
 - **GIVEN** 字号调至最大档、内容自然高度超过 `maxH`
 - **WHEN** 窗口重测量
 - **THEN** `isOverflowing==true`、窗口内容高度封顶 `==maxH`、中部滚动、底栏固定，窗口不超屏
 
-**覆盖测试**: TBD(unit: 大字号 + 长内容走生产测量路径 → 断言 isOverflowing 且内容高 ==maxH)
+**覆盖测试**: `Tests/LangFixTests/ReviewTypographyTests.swift` — `testFontTierChangeTriggersRemeasureAndCapsViaProductionPath`（生产订阅链路：改 `reviewFontTierRaw` → 泵 runloop → 断言自然高变大、`isOverflowing` 翻转、内容高封顶 `==maxH`）、`testXLargeLongContentMeasuresTallerAndCapsAtMaxH`（测量路径 + sizing 封顶判定）
 
 ## MODIFIED Requirements
 

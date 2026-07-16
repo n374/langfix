@@ -266,6 +266,10 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
     /// 订阅嵌套的 `state.followUp`（FollowUpSession，独立 ObservableObject）变化 → 驱动窗口重测量/封顶。
     /// 追问增长挂在 session 上、不会触发 `state.objectWillChange`，故必须单独订阅（user adj：高度未封顶 bug 根因）。
     private var followUpChangeCancellable: AnyCancellable?
+    /// 订阅字号档位变化 → 显式触发一次重测量（design font-size-setting D5）：字号变大后走既有
+    /// `refreshMeasurement → updateNaturalSize → applyResize` 链路，维持 maxH 封顶/中部滚动/底栏固定。
+    /// 不依赖隐藏测量宿主的隐式布局链（间接且不可断言）；重测量幂等，多触发一次无害。
+    private var fontTierCancellable: AnyCancellable?
     private var preferredScreen: NSScreen?
 
     private let sizing = ReviewWindowSizing()
@@ -309,6 +313,11 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
             }
         }
         observeFollowUpIfNeeded()
+        // dropFirst 跳过 @Published 订阅时的当前值回放；willSet 时机发新值 → async 延到下一 runloop，
+        // 届时 settings.reviewFontTier 已是新值，测量树读到新档位（与上面两条订阅的 async 处理一致）。
+        fontTierCancellable = SettingsStore.shared.$reviewFontTierRaw
+            .dropFirst().removeDuplicates()
+            .sink { [weak self] _ in DispatchQueue.main.async { self?.refreshMeasurement() } }
         // 「隐藏」按钮（现位于弹窗底部操作栏）→ 折叠为胶囊，与旧标题栏隐藏图标同一 .hideIcon 事件。
         state.onHide = { [weak self] in self?.handle(.hideIcon) }
         configurePanels()
@@ -760,6 +769,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         if let m = escMonitor { NSEvent.removeMonitor(m); escMonitor = nil }
         stateChangeCancellable = nil
         followUpChangeCancellable = nil
+        fontTierCancellable = nil
         machineState.presentation = .closed
         for p in [expandedPanel, capsulePanel] {
             p.delegate = nil
