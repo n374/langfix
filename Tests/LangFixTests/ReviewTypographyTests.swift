@@ -122,9 +122,11 @@ final class ReviewTypographyTests: XCTestCase {
         _ = NSApplication.shared
         let store = SettingsStore.shared
         let original = store.reviewFontTierRaw
+        // key 原本显式存在则恢复原值即可（didSet 落盘）；原本不存在才删，避免抹掉本机既有设置
+        let hadKey = UserDefaults.standard.object(forKey: "reviewFontTier") != nil
         defer {
             store.reviewFontTierRaw = original
-            UserDefaults.standard.removeObject(forKey: "reviewFontTier")   // 测后恢复，避免污染其它用例
+            if !hadKey { UserDefaults.standard.removeObject(forKey: "reviewFontTier") }
         }
         store.reviewFontTierRaw = ReviewFontTier.standard.rawValue
 
@@ -161,15 +163,16 @@ final class ReviewTypographyTests: XCTestCase {
 
     // MARK: 工具
 
-    /// 暂改共享 store 的档位执行测量，测后恢复原值并清理落盘 key（避免污染其它用例）。
+    /// 暂改共享 store 的档位执行测量，测后恢复原值；落盘 key 仅在原本不存在时清理（不抹本机既有设置）。
     @MainActor
     private static func withTier<T>(_ tier: ReviewFontTier, _ body: () -> T) -> T {
         let store = SettingsStore.shared
         let original = store.reviewFontTierRaw
+        let hadKey = UserDefaults.standard.object(forKey: "reviewFontTier") != nil
         store.reviewFontTierRaw = tier.rawValue
         defer {
             store.reviewFontTierRaw = original
-            UserDefaults.standard.removeObject(forKey: "reviewFontTier")
+            if !hadKey { UserDefaults.standard.removeObject(forKey: "reviewFontTier") }
         }
         return body()
     }
