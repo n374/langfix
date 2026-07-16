@@ -13,6 +13,11 @@ final class AppCoordinator {
     private var currentTask: Task<Void, Never>?
     /// 每次 start() 自增的代次：preview 回调只在「当前代且未取消」时应用，杜绝旧任务污染/取消后更新已关窗。
     private var generation = 0
+    /// 当前展示的 ReviewState（弱引用）：closeReviewAndCancel 用它在关闭前结束追问会话（评审#4）。
+    private weak var currentState: ReviewState?
+
+    /// 追问上下文预算上限（token 估算，保守启发值；design D5，落地可调/后续可设置项）。
+    static let followUpBudgetTokens = 8000
 
     private init() {}
 
@@ -30,7 +35,9 @@ final class AppCoordinator {
             presentConfigNeeded(cfg.missingFields)
             return
         }
-        let input = rawText.trimmed
+        // 先规范化内部换行为 LF（CRLF/CR/U+2028/U+2029），再去首尾空白：使发给模型的原文、diff 基线、
+        // 换行结构检测三者换行一致可比，杜绝跨来源换行差异导致的丢换行漏检（Adj3 闭环）。
+        let input = rawText.normalizedLineEndings.trimmed
         guard !input.isEmpty else { return }
         if input.count > cfg.maxChars {
             present(error: "文本过长（\(input.count) 字符，上限 \(cfg.maxChars)）")
@@ -88,6 +95,11 @@ final class AppCoordinator {
                 }
                 if Task.isCancelled || self.generation != myGen { return }
                 state.phase = .result(result)
+                // 定稿后注入追问会话（仅 .result 态；序号只在定稿后存在，design D2）。
+                // 会话只持 key-free 快照，发请求瞬取 Keychain（评审#5）。
+                state.followUp = FollowUpSession(
+                    boundResult: result,
+                    configSnapshot: FollowUpConfigSnapshot(from: cfg, followUpBudgetTokens: Self.followUpBudgetTokens))
             } catch let e as ReviewError {
                 if case .cancelled = e { return }
                 if self.generation != myGen { return }
@@ -114,6 +126,10 @@ final class AppCoordinator {
     /// 关闭弹窗并取消底层 Task。幂等：重复调用安全（cancel 已取消的 Task 无副作用）。
     /// **正确性核心**：这是关闭的唯一出口——销毁两 panel + cancel Task + 让在途 preview 回调失效。
     private func closeReviewAndCancel() {
+        // 关闭前先结束追问会话（评审#4）：中止在途追问 + 清空整会话内存（sessionEnd），
+        // 覆盖「关窗 / 新纠错 / 退出」三条清理触发点（design D3）。
+        currentState?.followUp?.cancelInFlight(.sessionEnd)
+        currentState = nil
         currentTask?.cancel()
         currentTask = nil
         generation += 1                 // 让在途 preview 回调（带旧 generation）失效
@@ -139,6 +155,7 @@ final class AppCoordinator {
     // MARK: - 窗口
 
     private func present(state: ReviewState) {
+        currentState = state             // 供 closeReviewAndCancel 在关闭前结束追问会话（评审#4）
         // behavior 在开窗时捕获；设置变更对已打开窗口下次生效，避免运行期改 level 抖动。
         let c = ReviewWindowController(state: state, behavior: SettingsStore.shared.windowBehaviorMode)
         // 关闭按钮 / 标题栏关闭 → 汇聚到同一 cancel 路径。
@@ -246,6 +263,9 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
     private let capsuleContainer = NSView()
     private var escMonitor: Any?
     private var stateChangeCancellable: AnyCancellable?
+    /// 订阅嵌套的 `state.followUp`（FollowUpSession，独立 ObservableObject）变化 → 驱动窗口重测量/封顶。
+    /// 追问增长挂在 session 上、不会触发 `state.objectWillChange`，故必须单独订阅（user adj：高度未封顶 bug 根因）。
+    private var followUpChangeCancellable: AnyCancellable?
     private var preferredScreen: NSScreen?
 
     private let sizing = ReviewWindowSizing()
@@ -280,8 +300,15 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         )
         super.init()
         stateChangeCancellable = state.objectWillChange.sink { [weak self] _ in
-            DispatchQueue.main.async { self?.refreshMeasurement() }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                // followUp 会话在 .result 时才注入（@Published → 此 sink 触发）：注入后订阅其变化，
+                // 使**追问增长**（追加一轮 / 流式增量）也走一遍 remeasure → applyResize 封顶 + isOverflowing 翻转。
+                self.observeFollowUpIfNeeded()
+                self.refreshMeasurement()
+            }
         }
+        observeFollowUpIfNeeded()
         // 「隐藏」按钮（现位于弹窗底部操作栏）→ 折叠为胶囊，与旧标题栏隐藏图标同一 .hideIcon 事件。
         state.onHide = { [weak self] in self?.handle(.hideIcon) }
         configurePanels()
@@ -388,6 +415,16 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         refreshMeasurement()
     }
 
+    /// 若当前 `state.followUp` 已注入且尚未订阅，则订阅其 `objectWillChange`：追问每次增长（追加一轮 / 流式增量 /
+    /// stage 变化 / 取消清空）都触发 `refreshMeasurement` → `updateNaturalSize`（isOverflowing 翻转）→ `applyResize`
+    /// （高度 clamp 到 maxH）。杜绝「追问越加越高、窗口超过屏幕」（user adj：最大高度未限制住）。
+    private func observeFollowUpIfNeeded() {
+        guard followUpChangeCancellable == nil, let session = state.followUp else { return }
+        followUpChangeCancellable = session.objectWillChange.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.refreshMeasurement() }
+        }
+    }
+
     private func refreshMeasurement() {
         let maxSize = currentMaxContentSize()
         let measuringController = NSHostingController(rootView: makeMeasurementView(maxContentSize: maxSize) { _ in })
@@ -420,15 +457,38 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
         // 上屏后按真实所在屏刷新内容上限。
         refreshDisplayedView()
         attachMeasurementHost(to: expandedContainer, maxContentSize: currentMaxContentSize())
-        // Esc：经 .cancelAction 移除后由此 monitor 归一为「折叠」（design.md §2.3）。
+        // Esc：经 .cancelAction 移除后由此 monitor 归一。追问 composer 焦点桥接（评审#6 / design UI-7）：
+        // 不再无条件吞 Esc —— 先查 composer 焦点/草稿/IME 态，据此决定「交文本系统 / 仅失焦 / 折叠」。
         escMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             if event.keyCode == 53 {   // Esc
+                // ① IME 组合态：交给文本系统取消组合，不吞、不折叠（直接查 field editor 真状态，评审#6）。
+                if self.composerIsComposingIME() { return event }
+                // ②③ composer 聚焦：Esc 仅失焦、保留草稿与流式，不折叠（再按 Esc（已失焦）才走折叠）。
+                if self.state.composerFocused {
+                    self.blurComposer()
+                    return nil
+                }
+                // ④ 未聚焦（含流式在途）：既有折叠语义——折叠不取消在途追问（流后台续）。
                 self.handle(.esc)
                 return nil
             }
             return event
         }
+    }
+
+    /// 让追问输入框失焦（Esc 桥接用）：清 AppKit firstResponder → SwiftUI @FocusState 随之置 false。
+    private func blurComposer() {
+        expandedPanel.makeFirstResponder(nil)
+        state.composerFocused = false
+    }
+
+    /// 追问输入框是否处于 IME 组合态（评审#6）：直接查 field editor 的 `hasMarkedText`（真状态）。
+    /// 编辑中的 SwiftUI TextField 由共享 field editor（NSTextView）承载；有 marked text 即正在拼字。
+    private func composerIsComposingIME() -> Bool {
+        if let tv = expandedPanel.firstResponder as? NSTextView, tv.hasMarkedText() { return true }
+        if let fe = expandedPanel.fieldEditor(false, for: nil) as? NSTextView, fe.hasMarkedText() { return true }
+        return false
     }
 
     private func currentMaxContentSize() -> CGSize {
@@ -699,6 +759,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
     func close() {
         if let m = escMonitor { NSEvent.removeMonitor(m); escMonitor = nil }
         stateChangeCancellable = nil
+        followUpChangeCancellable = nil
         machineState.presentation = .closed
         for p in [expandedPanel, capsulePanel] {
             p.delegate = nil

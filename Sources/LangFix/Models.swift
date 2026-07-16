@@ -40,6 +40,9 @@ enum IssueSeverity: String, Codable, Sendable {
 
 struct Issue: Codable, Identifiable, Sendable {
     let id = UUID()
+    /// 模型输出的 1-based 序号（「修正 N」）。缺省/非法为 0 → 由 `ReviewResult.numberedIssues` 按位置兜底重排。
+    /// 权威序号解析在 `ReviewResult.numberedIssues` 单一来源，保证 UI 显示与追问上下文同源（design D1）。
+    var index: Int
     var category: IssueCategory
     var severity: IssueSeverity
     var before: String
@@ -47,11 +50,12 @@ struct Issue: Codable, Identifiable, Sendable {
     var reasonZh: String
 
     enum CodingKeys: String, CodingKey {
-        case category, severity, before, after
+        case index, category, severity, before, after
         case reasonZh = "reason_zh"
     }
 
-    init(category: IssueCategory, severity: IssueSeverity, before: String, after: String, reasonZh: String) {
+    init(index: Int = 0, category: IssueCategory, severity: IssueSeverity, before: String, after: String, reasonZh: String) {
+        self.index = index
         self.category = category
         self.severity = severity
         self.before = before
@@ -61,6 +65,7 @@ struct Issue: Codable, Identifiable, Sendable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.index = (try? c.decode(Int.self, forKey: .index)) ?? 0
         self.category = IssueCategory.lenient((try? c.decode(String.self, forKey: .category)) ?? "")
         self.severity = IssueSeverity.lenient((try? c.decode(String.self, forKey: .severity)) ?? "")
         self.before = (try? c.decode(String.self, forKey: .before)) ?? ""
@@ -70,6 +75,7 @@ struct Issue: Codable, Identifiable, Sendable {
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(index, forKey: .index)
         try c.encode(category.rawValue, forKey: .category)
         try c.encode(severity.rawValue, forKey: .severity)
         try c.encode(before, forKey: .before)
@@ -134,6 +140,21 @@ struct ReviewResult: Codable, Sendable {
         ReviewResult(hasIssues: false, original: localInput, corrected: localInput,
                      translationZh: "", summaryZh: note, issues: [])
     }
+
+    /// **权威带序号修正（单一来源，design D1 同源）**：UI 显示「修正 N」与追问上下文编号都读这里，杜绝漂移。
+    /// - 模型输出的 `index` 若构成严格 1..N 排列（连续、无重、无缺）→ **采用模型序号**并按其升序排列（满足用户「让 LLM 输出该格式」）。
+    /// - 否则（缺省/跳号/重号/越界）→ **应用按位置重排** 1..N 兜底（正确性优先，绝不让「修正 N」指错条目）。
+    /// 返回 (序号, issue) 且序号必为连续 1..N，与数组顺序一致。
+    var numberedIssues: [(index: Int, issue: Issue)] {
+        let n = issues.count
+        guard n > 0 else { return [] }
+        let idxs = issues.map { $0.index }
+        if Set(idxs) == Set(1...n) {                       // 严格 1..N 排列 → 采用模型序号，按其排序
+            let ordered = issues.sorted { $0.index < $1.index }
+            return ordered.map { ($0.index, $0) }
+        }
+        return issues.enumerated().map { ($0.offset + 1, $0.element) }   // 兜底：按位置重排
+    }
 }
 
 // MARK: - 流式预览值（独立于 ReviewResult，不污染其 hasIssues/overEdited 不变式）
@@ -164,6 +185,111 @@ struct StreamingPreview: Sendable {
         self.issues = issues
         self.alternative = alternative
         self.stage = stage
+    }
+}
+
+// MARK: - 追问答疑（ai-followup change · design D2/D4）
+
+/// 一轮**已成功完成**的追问问答（进入会话历史）。取消/失败的轮次**不入** turns（design D3）。
+/// 纯易失内存值类型，随 FollowUpSession（挂 ReviewState）生命周期释放，绝不落盘（Constraint-2 / design D7）。
+struct FollowUpTurn: Identifiable, Sendable, Equatable {
+    let id = UUID()
+    /// 用户提问原文（发给 AI 时一律 data 化，不作指令）。
+    var question: String
+    /// AI 完整回答（纯文本，尽力 Markdown 渲染）。
+    var answer: String
+    /// 本轮问题引用到的修正 1-based 序号（与 D1 同源，仅用于 UI 引用 chip 与断言）。
+    var referencedIndices: [Int]
+
+    init(question: String, answer: String, referencedIndices: [Int] = []) {
+        self.question = question
+        self.answer = answer
+        self.referencedIndices = referencedIndices
+    }
+}
+
+/// 当前**在途一轮**的临时状态：问题 + 增量答案 + 阶段。取消/失败即丢弃、不转 turns（design D3）。
+struct StreamingAnswer: Sendable, Equatable {
+    var question: String
+    /// 已流出的增量答案（best-effort Markdown 渲染的原始文本）。
+    var answer: String
+    var referencedIndices: [Int]
+    var stage: Stage
+    /// stage == .failed 时的中文错误说明（供失败气泡 + 重试展示）。
+    var errorText: String?
+
+    /// receiving：正在流式接收；finalizing：流→非流回退定稿中（answer 将被整体替换，见 design D4）；
+    /// failed：本轮失败（展示错误 + 重试，不写 turns）。
+    enum Stage: Sendable, Equatable { case receiving, finalizing, failed }
+
+    init(question: String, answer: String = "", referencedIndices: [Int] = [],
+         stage: Stage = .receiving, errorText: String? = nil) {
+        self.question = question
+        self.answer = answer
+        self.referencedIndices = referencedIndices
+        self.stage = stage
+        self.errorText = errorText
+    }
+}
+
+/// 组装好、可直接交给 AIClient 拼消息的追问上下文快照（纯数据，注入防御在 Prompt 层做 data 化）。
+/// design D4：base = 原文 + 完整带序号修正结果 + 当前问题（**恒保留**）；history 可被预算裁剪（design D5）。
+struct FollowUpContext: Sendable, Equatable {
+    var original: String
+    var corrected: String
+    var summaryZh: String
+    /// 完整带 1-based 序号的修正清单（与 D1 同源；预算裁剪**绝不**丢弃，含被引用修正）。
+    var numberedIssues: [NumberedIssue]
+    /// 经预算裁剪后**保留**的历史问答轮（可能少于会话全部 turns）。
+    var history: [FollowUpTurn]
+    /// 当前这轮用户问题。
+    var question: String
+
+    struct NumberedIssue: Sendable, Equatable {
+        var index: Int          // 1-based，与 UI「修正 N」同源
+        var before: String
+        var after: String
+        var category: String
+        var severity: String
+        var reasonZh: String
+    }
+}
+
+/// **不含 apiKey** 的配置快照（评审#5）：绝不把密钥挂在窗口存续期的会话对象上。
+/// API key 在发请求瞬间由 KeychainStore.apiKey() 现取现用，组装完即释放，不驻留 session（design D2）。
+struct FollowUpConfigSnapshot: Sendable, Equatable {
+    var baseURL: String
+    var model: String
+    var temperature: Double
+    var streamingEnabled: Bool
+    /// 追问上下文预算上限（token 估算，保守启发值；design D5）。
+    var followUpBudgetTokens: Int
+
+    /// 从完整 AppConfig 派生（丢弃 apiKey 等 review 专属字段）。
+    init(from cfg: AppConfig, followUpBudgetTokens: Int) {
+        self.baseURL = cfg.baseURL
+        self.model = cfg.model
+        self.temperature = cfg.temperature
+        self.streamingEnabled = cfg.streamingEnabled
+        self.followUpBudgetTokens = followUpBudgetTokens
+    }
+
+    init(baseURL: String, model: String, temperature: Double,
+         streamingEnabled: Bool, followUpBudgetTokens: Int) {
+        self.baseURL = baseURL
+        self.model = model
+        self.temperature = temperature
+        self.streamingEnabled = streamingEnabled
+        self.followUpBudgetTokens = followUpBudgetTokens
+    }
+
+    /// 发请求瞬间：把**瞬取的** Keychain key 与本快照拼成完整 AppConfig 交给 AIClient。
+    /// review-only 字段（maxChars/diffThreshold/...）追问链路不用，填占位默认（design D2）。
+    func appConfig(apiKey: String) -> AppConfig {
+        AppConfig(baseURL: baseURL, apiKey: apiKey, model: model,
+                  temperature: temperature, maxChars: 0,
+                  diffThreshold: 0, minWordsForGuard: 0, minAbsEdits: 0,
+                  structuredMode: .text, streamingEnabled: streamingEnabled)
     }
 }
 
@@ -212,6 +338,10 @@ enum ReviewError: LocalizedError, Sendable {
     case server(Int)
     case decode(String)
     case cancelled
+    /// 服务端上下文超限（400/413 body 含 context_length 等）：可重试的追问失败（design D4/D5）。
+    case contextLengthExceeded
+    /// 追问回答被截断（finish_reason == length）或为空：不得当作完整回答提交，fail loud 可重试（正确性红线）。
+    case truncated
 
     var errorDescription: String? {
         switch self {
@@ -224,10 +354,21 @@ enum ReviewError: LocalizedError, Sendable {
         case .server(let code): return "服务端错误（HTTP \(code)）"
         case .decode(let m): return "解析失败：\(m)"
         case .cancelled: return "已取消"
+        case .contextLengthExceeded: return "本次结果与问答过长，超出模型上下文上限，请缩短问题或减少追问后重试"
+        case .truncated: return "回答不完整（被截断或为空），请重试或换个更聚焦的问题"
         }
     }
 }
 
 extension String {
     var trimmed: String { trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// 把各种换行统一为 LF（`\n`）：CRLF、CR、Unicode 行分隔符(U+2028)/段分隔符(U+2029)。
+    /// 用于输入边界规范化与换行结构检测，使跨来源（Windows/老 Mac/富文本）换行一致可比（Adj3 闭环，评审复审）。
+    var normalizedLineEndings: String {
+        replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{2028}", with: "\n")
+            .replacingOccurrences(of: "\u{2029}", with: "\n")
+    }
 }

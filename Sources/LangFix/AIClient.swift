@@ -1,5 +1,16 @@
 import Foundation
 
+/// 供 FollowUpSession 依赖与测试注入的抽象：追问上下文 → AI 纯文本回答（design D4）。
+/// 与 ReviewProviding 正交：走**无 response_format 的纯文本通道**，不喂 PartialReviewParser。
+protocol FollowUpProviding: Sendable {
+    /// 流式追问：逐块 `onDelta` 回吐增量文本，返回**权威完整回答**（回退发生时返回值为整体替换后的定稿，
+    /// 调用方应以返回值为该轮答案真相，onDelta 仅用于实时预览）。
+    func followUpStreaming(context: FollowUpContext, config: AppConfig,
+                           onDelta: @MainActor @Sendable (String) async -> Void) async throws -> String
+    /// 非流式追问回退：一次性返回完整回答。
+    func followUp(context: FollowUpContext, config: AppConfig) async throws -> String
+}
+
 /// 供 ReviewEngine 依赖与测试注入的抽象：输入文本 → 校验过的 ReviewResult。
 protocol ReviewProviding: Sendable {
     func review(text: String, config: AppConfig, mode: AIClient.Mode) async throws -> ReviewResult
@@ -26,7 +37,7 @@ extension ReviewProviding {
 /// 对上层只暴露「输入文本 → 校验过的 ReviewResult」，屏蔽端点能力差异。
 /// 无可变实例状态（探测缓存放在 actor），故 Sendable，可跨并发安全使用。
 /// 参见 docs/architecture/modules/ai-client.md。
-final class AIClient: ReviewProviding, Sendable {
+final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
 
     enum Mode: Sendable { case firstPass, strict }
 
@@ -307,6 +318,189 @@ final class AIClient: ReviewProviding, Sendable {
         var data = Data()
         for try await b in bytes { data.append(b) }
         return String(decoding: data, as: UTF8.self)
+    }
+
+    // MARK: - 追问答疑（FollowUpProviding · design D4，纯文本 SSE，复用骨架）
+
+    /// 流式追问：优先真流式，协议级/瞬时不可用静默回退非流式（对上层透明）。
+    /// 上下文超限（400/413 body 含 context_length 等）→ 抛 `.contextLengthExceeded`（不回退，非流式也会超限）。
+    func followUpStreaming(context ctx: FollowUpContext, config cfg: AppConfig,
+                           onDelta: @MainActor @Sendable (String) async -> Void) async throws -> String {
+        let key = Self.cacheKey(cfg)
+        // 已知不支持流式 → 直接非流式（不触发 onDelta，用户由 UI「正在回答…」占位无感）。
+        guard cfg.streamingEnabled, await Self.streamCap.get(key) != .unsupported else {
+            return try await followUp(context: ctx, config: cfg)
+        }
+        do {
+            let text = try await streamFollowUp(context: ctx, cfg: cfg, onDelta: onDelta)
+            await Self.streamCap.set(key, .supported)
+            return text
+        } catch let fallback as StreamFallback {
+            if fallback.cacheUnsupported { await Self.streamCap.set(key, .unsupported) }
+            // 回退非流式定稿：返回值将由调用方**整体替换**已流出的 partial（design D4，不 append）。
+            return try await followUp(context: ctx, config: cfg)
+        }
+        // 其余 ReviewError（auth/rateLimited/server/cancelled/contextLengthExceeded）按既有错误路径上抛。
+    }
+
+    /// 非流式追问：一次请求拿完整回答。
+    func followUp(context ctx: FollowUpContext, config cfg: AppConfig) async throws -> String {
+        var req = try makeRequest(cfg: cfg)
+        let body: [String: Any] = [
+            "model": cfg.model,
+            "temperature": cfg.temperature,
+            "messages": Self.followUpMessages(ctx),
+        ]
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, resp): (Data, URLResponse)
+        do {
+            (data, resp) = try await session.data(for: req)
+        } catch is CancellationError {
+            throw ReviewError.cancelled
+        } catch let urlErr as URLError where urlErr.code == .cancelled {
+            throw ReviewError.cancelled
+        } catch {
+            throw ReviewError.network(error.localizedDescription)
+        }
+        guard let http = resp as? HTTPURLResponse else { throw ReviewError.network("无 HTTP 响应") }
+        try Self.mapFollowUpStatus(http.statusCode, body: String(decoding: data, as: UTF8.self))
+        guard let parsed = try? JSONDecoder().decode(ChatResponse.self, from: data),
+              let choice = parsed.choices.first else {
+            throw ReviewError.decode("无法解析追问响应外层")
+        }
+        // 正确性红线（评审#1）：截断 / 空回答不当成功。
+        if choice.finishReason == "length" { throw ReviewError.truncated }
+        let content = choice.message.content ?? choice.message.refusal ?? ""
+        if content.trimmed.isEmpty { throw ReviewError.truncated }
+        return content
+    }
+
+    /// 单次流式追问请求：发 `stream:true`（无 response_format），逐行解析 SSE，累积 delta.content，
+    /// 每块 `await onDelta`。返回累积完整回答。流式不可用/瞬时异常抛 StreamFallback；上下文超限抛 ReviewError。
+    private func streamFollowUp(context ctx: FollowUpContext, cfg: AppConfig,
+                               onDelta: @MainActor @Sendable (String) async -> Void) async throws -> String {
+        var req = try makeRequest(cfg: cfg)
+        let body: [String: Any] = [
+            "model": cfg.model,
+            "temperature": cfg.temperature,
+            "stream": true,
+            "messages": Self.followUpMessages(ctx),
+        ]
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let bytes: URLSession.AsyncBytes
+        let resp: URLResponse
+        do {
+            (bytes, resp) = try await session.bytes(for: req)
+        } catch is CancellationError {
+            throw ReviewError.cancelled
+        } catch let urlErr as URLError where urlErr.code == .cancelled {
+            throw ReviewError.cancelled
+        } catch {
+            throw ReviewError.network(error.localizedDescription)
+        }
+
+        guard let http = resp as? HTTPURLResponse else { throw ReviewError.network("无 HTTP 响应") }
+        switch http.statusCode {
+        case 200...299: break
+        case 401, 403: throw ReviewError.auth
+        case 429: throw ReviewError.rateLimited
+        case 400, 413:
+            // 读 body 分类：上下文超限 → 明确可重试错误（design D5 服务端路径）；
+            // 纯 stream 不支持 → 协议级回退非流式；其余 400 归 .server(400)。
+            let lower = ((try? await Self.collect(bytes)) ?? "").lowercased()
+            if Self.mentionsContextLength(lower) { throw ReviewError.contextLengthExceeded }
+            if http.statusCode == 413 { throw ReviewError.contextLengthExceeded }   // 413 语义即 payload 过大
+            if lower.contains("stream") { throw StreamFallback(cacheUnsupported: true) }
+            throw ReviewError.server(400)
+        default:
+            throw ReviewError.server(http.statusCode)
+        }
+
+        var accumulated = ""
+        var sawDataFrame = false
+        var sawDone = false
+        var finish: String? = nil
+        do {
+            for try await line in bytes.lines {
+                if Task.isCancelled { throw ReviewError.cancelled }
+                guard line.hasPrefix("data:") else { continue }
+                sawDataFrame = true
+                let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                if payload == "[DONE]" { sawDone = true; break }
+                guard let pdata = payload.data(using: .utf8),
+                      let chunk = try? JSONDecoder().decode(StreamChunk.self, from: pdata),
+                      let choice = chunk.choices.first else { continue }
+                if let f = choice.finishReason { finish = f }
+                if let delta = choice.delta?.content, !delta.isEmpty {
+                    accumulated += delta
+                    await onDelta(delta)
+                }
+            }
+        } catch let e as ReviewError {
+            throw e   // cancelled
+        } catch is CancellationError {
+            throw ReviewError.cancelled
+        } catch let urlErr as URLError where urlErr.code == .cancelled {
+            throw ReviewError.cancelled
+        } catch {
+            // 流读取中途异常 = 瞬时；已见帧 → 本次非流式定稿（不缓存），从未见帧 → 协议级不支持。
+            throw StreamFallback(cacheUnsupported: !sawDataFrame)
+        }
+        if !sawDataFrame {
+            // 200 但 body 非 SSE / 全程无 data: 帧 → 协议级不支持流式。
+            throw StreamFallback(cacheUnsupported: true)
+        }
+        // 正确性红线（评审#1）：截断 / 空回答绝不当成功返回。
+        if finish == "length" { throw ReviewError.truncated }
+        if accumulated.trimmed.isEmpty {
+            // 见帧但无有效内容（全是错误帧/空帧）→ 非流式重试一次拿真内容；仍空由 followUp/会话层 fail loud。
+            throw StreamFallback(cacheUnsupported: false)
+        }
+        // 无完成信号（既无 [DONE] 也无 finish_reason）→ 流可能被中途干净截断（纯文本无结构校验兜底，
+        // 评审#1 复审）→ 回退非流式拿有 finish_reason 的权威定稿，绝不把无终止标记的半截当完整。
+        if !sawDone && finish == nil {
+            throw StreamFallback(cacheUnsupported: false)
+        }
+        return accumulated
+    }
+
+    /// 追问消息序列：system + 上下文包(data) + 历史轮(user/assistant) + 当前问题(user, data)。
+    /// history 已由调用方按预算裁剪（design D5）；上下文包与当前问题恒在。
+    static func followUpMessages(_ ctx: FollowUpContext) -> [[String: String]] {
+        var msgs: [[String: String]] = [
+            ["role": "system", "content": Prompt.followUpSystem],
+            ["role": "user", "content": Prompt.followUpContext(ctx)],
+        ]
+        for turn in ctx.history {
+            msgs.append(["role": "user", "content": Prompt.followUpQuestion(turn.question)])
+            msgs.append(["role": "assistant", "content": turn.answer])
+        }
+        msgs.append(["role": "user", "content": Prompt.followUpQuestion(ctx.question)])
+        return msgs
+    }
+
+    /// 追问非流式响应状态码映射（含上下文超限分类）。
+    static func mapFollowUpStatus(_ code: Int, body: String) throws {
+        switch code {
+        case 200...299: return
+        case 401, 403: throw ReviewError.auth
+        case 429: throw ReviewError.rateLimited
+        case 400:
+            if mentionsContextLength(body.lowercased()) { throw ReviewError.contextLengthExceeded }
+            throw ReviewError.server(400)
+        case 413: throw ReviewError.contextLengthExceeded
+        default: throw ReviewError.server(code)
+        }
+    }
+
+    /// 是否为上下文超限的 body 特征（design D4 关键词）。
+    static func mentionsContextLength(_ lower: String) -> Bool {
+        lower.contains("context_length") || lower.contains("context length")
+            || lower.contains("maximum context") || lower.contains("too long")
+            || lower.contains("maximum_context") || lower.contains("context_length_exceeded")
+            || (lower.contains("token") && (lower.contains("exceed") || lower.contains("maximum") || lower.contains("limit")))
     }
 
     // MARK: - 测试连接
