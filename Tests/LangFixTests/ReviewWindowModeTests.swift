@@ -155,8 +155,10 @@ final class ReviewWindowModeTests: XCTestCase {
 
     func testWindowBehaviorModeDisplayMetadata() {
         for mode in modes {
-            XCTAssertFalse(mode.title.isEmpty)
-            XCTAssertFalse(mode.subtitle.isEmpty)
+            XCTAssertFalse(mode.title(.chinese).isEmpty)
+            XCTAssertFalse(mode.title(.english).isEmpty)
+            XCTAssertFalse(mode.subtitle(.chinese).isEmpty)
+            XCTAssertFalse(mode.subtitle(.english).isEmpty)
             XCTAssertFalse(mode.iconName.isEmpty)
         }
         XCTAssertEqual(WindowBehaviorMode.focusCollapse.iconName, "eye.slash")

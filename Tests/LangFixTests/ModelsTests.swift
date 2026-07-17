@@ -52,7 +52,7 @@ final class ModelsTests: XCTestCase {
          "translation_zh": "谢谢", "summary_zh": "更完整", "issues": []}
         """
         let r = try JSONDecoder().decode(ReviewResult.self, from: json.data(using: .utf8)!)
-        XCTAssertEqual(r.translationZh, "谢谢")
+        XCTAssertEqual(r.translation, "谢谢")
     }
 
     func testReviewResultTranslationZhDefaultsEmptyWhenAbsent() throws {
@@ -61,7 +61,7 @@ final class ModelsTests: XCTestCase {
         {"has_issues": false, "original": "ok", "corrected": "ok", "summary_zh": "", "issues": []}
         """
         let r = try JSONDecoder().decode(ReviewResult.self, from: json.data(using: .utf8)!)
-        XCTAssertEqual(r.translationZh, "")
+        XCTAssertEqual(r.translation, "")
     }
 
     // round6 需求2：更地道说法的一句中文说明 alternative_reason_zh。
@@ -74,7 +74,7 @@ final class ModelsTests: XCTestCase {
         """
         let r = try JSONDecoder().decode(ReviewResult.self, from: json.data(using: .utf8)!)
         XCTAssertEqual(r.alternative, "Could you let me know")
-        XCTAssertEqual(r.alternativeReasonZh, "疑问句式更自然委婉")
+        XCTAssertEqual(r.alternativeReason, "疑问句式更自然委婉")
     }
 
     func testAlternativeReasonZhDefaultsEmptyWhenAbsent() throws {
@@ -82,6 +82,6 @@ final class ModelsTests: XCTestCase {
         {"has_issues": false, "original": "ok", "corrected": "ok", "summary_zh": "", "issues": []}
         """
         let r = try JSONDecoder().decode(ReviewResult.self, from: json.data(using: .utf8)!)
-        XCTAssertEqual(r.alternativeReasonZh, "")
+        XCTAssertEqual(r.alternativeReason, "")
     }
 }

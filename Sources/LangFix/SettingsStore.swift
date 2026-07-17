@@ -27,7 +27,30 @@ final class SettingsStore: ObservableObject {
     /// 显示即时生效由 @Published 重绘承担；窗口重测量由 ReviewWindowController 显式订阅（design font-size-setting D4/D5）。
     @Published var reviewFontTierRaw: String { didSet { d.set(reviewFontTierRaw, forKey: K.reviewFontTier) } }
 
-    private enum K {
+    // MARK: 语言配置（language-config change · design D1/D2）
+
+    /// 用户语言（母语，驱动 UI 与解释/翻译）。didSet 维持不变式：与目标语言相等 → 目标自动翻转（UI 层第①层保证）。
+    @Published var userLanguageRaw: String {
+        didSet {
+            d.set(userLanguageRaw, forKey: K.userLanguage)
+            if userLanguageRaw == targetLanguageRaw, let u = AppLanguage(rawValue: userLanguageRaw) {
+                targetLanguageRaw = u.other.rawValue
+            }
+        }
+    }
+    /// 目标语言（被纠错语言、混排统一方向）。didSet 同上反向翻转（两 didSet 互触发一轮后收敛，不死循环）。
+    @Published var targetLanguageRaw: String {
+        didSet {
+            d.set(targetLanguageRaw, forKey: K.targetLanguage)
+            if targetLanguageRaw == userLanguageRaw, let t = AppLanguage(rawValue: targetLanguageRaw) {
+                userLanguageRaw = t.other.rawValue
+            }
+        }
+    }
+    /// 语言是否已确认（design D2/D3）：新装为 false → 首次触发纠错前强制引导；确认后置 true 永不回退。
+    @Published var languageConfigured: Bool { didSet { d.set(languageConfigured, forKey: K.languageConfigured) } }
+
+    enum K {
         static let baseURL = "baseURL"
         static let model = "model"
         static let temperature = "temperature"
@@ -40,9 +63,25 @@ final class SettingsStore: ObservableObject {
         static let reviewTheme = "reviewTheme"
         static let windowBehaviorMode = "windowBehaviorMode"
         static let reviewFontTier = "reviewFontTier"
+        static let userLanguage = "userLanguage"
+        static let targetLanguage = "targetLanguage"
+        static let languageConfigured = "languageConfigured"
+
+        /// **v1 存量键集（冻结常量，design D2）**：仅用于「老用户升级」判定——任一键有持久化值即算旧版使用痕迹。
+        /// 之后新增的设置键**不要**加进来（判定只看 v1 存量集，新键不影响老用户识别）。
+        static let legacyV1Keys: [String] = [
+            baseURL, model, temperature, maxChars, diffThreshold, minWordsForGuard,
+            minAbsEdits, structuredMode, streamingEnabled, reviewTheme, windowBehaviorMode, reviewFontTier,
+        ]
     }
 
     private init() {
+        // 语言迁移必须**早于 register(defaults:)**：register 后 `object(forKey:)` 会命中 registration domain，
+        // 无法再区分「用户真写过」与「注册默认」，老用户判定会被污染（design D2）。
+        Self.migrateLanguageIfNeeded(
+            defaults: d,
+            localeIdentifier: Locale.preferredLanguages.first ?? Locale.current.identifier,
+            hasLegacyKeychainKey: KeychainStore.hasAPIKey)
         d.register(defaults: [
             K.temperature: 0.2,
             K.maxChars: 4000,
@@ -67,6 +106,37 @@ final class SettingsStore: ObservableObject {
         reviewThemeRaw = d.string(forKey: K.reviewTheme) ?? ReviewThemeID.defaultID.rawValue
         windowBehaviorModeRaw = d.string(forKey: K.windowBehaviorMode) ?? WindowBehaviorMode.defaultMode.rawValue
         reviewFontTierRaw = d.string(forKey: K.reviewFontTier) ?? ReviewFontTier.defaultTier.rawValue
+        // 读取校验（design D1 第②层保证）：非法 rawValue / 目标==用户（手改 defaults 脏数据）→ 确定性修复并写回。
+        let lang = LanguagePolicy.sanitize(
+            userRaw: d.string(forKey: K.userLanguage),
+            targetRaw: d.string(forKey: K.targetLanguage),
+            localeIdentifier: Locale.preferredLanguages.first ?? Locale.current.identifier)
+        userLanguageRaw = lang.user.rawValue
+        targetLanguageRaw = lang.target.rawValue
+        languageConfigured = d.bool(forKey: K.languageConfigured)
+        d.set(lang.user.rawValue, forKey: K.userLanguage)     // init 内赋值不触发 didSet，显式写回修复值
+        d.set(lang.target.rawValue, forKey: K.targetLanguage)
+    }
+
+    /// 一次性确定性语言迁移（design D2，幂等：仅 `languageConfigured` 键不存在时执行）。
+    /// 抽为可注入 defaults 的静态函数以便测试；老用户信号 = 任一 v1 持久化键 ∨ Keychain API key（宽口径，评审 R1-4）。
+    static func migrateLanguageIfNeeded(defaults d: UserDefaults,
+                                        localeIdentifier: String,
+                                        hasLegacyKeychainKey: Bool) {
+        guard d.object(forKey: K.languageConfigured) == nil else { return }
+        let hasLegacyTrace = K.legacyV1Keys.contains { d.object(forKey: $0) != nil } || hasLegacyKeychainKey
+        if hasLegacyTrace {
+            // 老用户升级：自动迁移为 用户=中、目标=英、已配置（等价现状行为，不打断；truth table 最后一行）。
+            d.set(AppLanguage.chinese.rawValue, forKey: K.userLanguage)
+            d.set(AppLanguage.english.rawValue, forKey: K.targetLanguage)
+            d.set(true, forKey: K.languageConfigured)
+        } else {
+            // 新装：按 locale truth table 预填，待首启引导确认（languageConfigured=false）。
+            let (user, target) = LanguagePolicy.defaults(forLocaleIdentifier: localeIdentifier)
+            d.set(user.rawValue, forKey: K.userLanguage)
+            d.set(target.rawValue, forKey: K.targetLanguage)
+            d.set(false, forKey: K.languageConfigured)
+        }
     }
 
     var structuredMode: StructuredMode {
@@ -88,6 +158,15 @@ final class SettingsStore: ObservableObject {
         ReviewFontTier(rawValueOrDefault: reviewFontTierRaw)
     }
 
+    /// 用户语言（init 已 sanitize、didSet 维持合法，兜底仅防御性）。
+    var userLanguage: AppLanguage { AppLanguage(rawValue: userLanguageRaw) ?? .english }
+
+    /// 目标语言（不变式：恒 ≠ userLanguage；兜底取 other 保证不变式即便 raw 被外部改坏）。
+    var targetLanguage: AppLanguage {
+        let t = AppLanguage(rawValue: targetLanguageRaw) ?? userLanguage.other
+        return t == userLanguage ? userLanguage.other : t
+    }
+
     /// 组装传给引擎的配置快照（含 Keychain 里的 key）。
     func config() -> AppConfig {
         AppConfig(
@@ -100,7 +179,9 @@ final class SettingsStore: ObservableObject {
             minWordsForGuard: minWordsForGuard,
             minAbsEdits: minAbsEdits,
             structuredMode: structuredMode,
-            streamingEnabled: streamingEnabled
+            streamingEnabled: streamingEnabled,
+            targetLanguage: targetLanguage,
+            userLanguage: userLanguage
         )
     }
 }

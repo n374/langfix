@@ -25,10 +25,10 @@ final class Round6FeaturesTests: XCTestCase {
         // alternative 与原文不同 → 走「地道版改动对照」diff 分支；带 reason → 走说明分支。
         state.phase = .result(ReviewResult(
             hasIssues: true, original: "I want know that", corrected: "I want to know that",
-            translationZh: "我想知道那个", summaryZh: "缺 to",
+            translation: "我想知道那个", summary: "缺 to",
             issues: [Issue(category: .grammar, severity: .error, before: "want know",
-                           after: "want to know", reasonZh: "不定式")],
-            alternative: "I'd like to know more about that", alternativeReasonZh: "更委婉自然"))
+                           after: "want to know", reason: "不定式")],
+            alternative: "I'd like to know more about that", alternativeReason: "更委婉自然"))
         renderAndAssert(state)
     }
 
@@ -38,8 +38,8 @@ final class Round6FeaturesTests: XCTestCase {
         // alternative 与原文相同 → 不出 diff 分支；reason 为空 → 不出说明分支（覆盖另一半）。
         state.phase = .result(ReviewResult(
             hasIssues: false, original: "All good here.", corrected: "All good here.",
-            translationZh: "", summaryZh: "", issues: [],
-            alternative: "All good here.", alternativeReasonZh: ""))
+            translation: "", summary: "", issues: [],
+            alternative: "All good here.", alternativeReason: ""))
         renderAndAssert(state)
     }
 
