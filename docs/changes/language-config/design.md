@@ -52,7 +52,7 @@ enum AppLanguage: String, Codable, CaseIterable, Sendable {
 - **不变式：目标语言 ≠ 用户语言**。V1 两语言集均为 {中,英}，故目标语言实际由用户语言唯一确定；仍**持久化两个键**，为后续扩目标语言集留位（届时只放宽 UI 约束，存储不迁移）。
 - 不变式由三层共同保证：① UI 层自动翻转（见 D3）；② `SettingsStore` 读取时校验，发现相等（手改 defaults / 脏数据）→ 目标语言强制翻转为另一语言（确定性修复，不 crash）；③ 纯函数 `LanguagePolicy.normalized(user:target:)` 承载该规则，可单测。
 
-### D2 迁移与首启判定：`languageConfigured` 键 + 「持久化 baseURL 存在」作老用户信号
+### D2 迁移与首启判定：`languageConfigured` 键 + 「任一 v1 持久化键 ∨ Keychain key」作老用户信号
 
 `SettingsStore.init()` 中执行一次确定性迁移（早于任何读取）：
 
