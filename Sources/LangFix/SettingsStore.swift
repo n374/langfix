@@ -23,6 +23,9 @@ final class SettingsStore: ObservableObject {
     @Published var reviewThemeRaw: String { didSet { d.set(reviewThemeRaw, forKey: K.reviewTheme) } }
     /// 窗口行为模式（非敏感偏好）：开窗时捕获，已打开窗口下次生效。
     @Published var windowBehaviorModeRaw: String { didSet { d.set(windowBehaviorModeRaw, forKey: K.windowBehaviorMode) } }
+    /// 结果浮窗字号档位（非敏感偏好）：只存 `ReviewFontTier.rawValue`，不进 `AppConfig`（与 AI 引擎无关）。
+    /// 显示即时生效由 @Published 重绘承担；窗口重测量由 ReviewWindowController 显式订阅（design font-size-setting D4/D5）。
+    @Published var reviewFontTierRaw: String { didSet { d.set(reviewFontTierRaw, forKey: K.reviewFontTier) } }
 
     private enum K {
         static let baseURL = "baseURL"
@@ -36,6 +39,7 @@ final class SettingsStore: ObservableObject {
         static let streamingEnabled = "streamingEnabled"
         static let reviewTheme = "reviewTheme"
         static let windowBehaviorMode = "windowBehaviorMode"
+        static let reviewFontTier = "reviewFontTier"
     }
 
     private init() {
@@ -49,6 +53,7 @@ final class SettingsStore: ObservableObject {
             K.streamingEnabled: true,   // 默认开启流式（旧用户升级后默认 true）
             K.reviewTheme: ReviewThemeID.defaultID.rawValue,   // 默认 Aurora Glass（旧用户升级即得默认）
             K.windowBehaviorMode: WindowBehaviorMode.defaultMode.rawValue,   // 默认 C：普通窗口
+            K.reviewFontTier: ReviewFontTier.defaultTier.rawValue,   // 默认「大」（未显式设置过的老用户升级即得新默认）
         ])
         baseURL = d.string(forKey: K.baseURL) ?? ""
         model = d.string(forKey: K.model) ?? ""
@@ -61,6 +66,7 @@ final class SettingsStore: ObservableObject {
         streamingEnabled = d.bool(forKey: K.streamingEnabled)   // register 默认 true → 未设置时返回 true
         reviewThemeRaw = d.string(forKey: K.reviewTheme) ?? ReviewThemeID.defaultID.rawValue
         windowBehaviorModeRaw = d.string(forKey: K.windowBehaviorMode) ?? WindowBehaviorMode.defaultMode.rawValue
+        reviewFontTierRaw = d.string(forKey: K.reviewFontTier) ?? ReviewFontTier.defaultTier.rawValue
     }
 
     var structuredMode: StructuredMode {
@@ -75,6 +81,11 @@ final class SettingsStore: ObservableObject {
     /// 当前窗口行为模式（非法 rawValue 自动 fallback 默认 C）。
     var windowBehaviorMode: WindowBehaviorMode {
         WindowBehaviorMode(rawValueOrDefault: windowBehaviorModeRaw)
+    }
+
+    /// 当前结果浮窗字号档位（非法 rawValue 自动 fallback 默认「大」）。
+    var reviewFontTier: ReviewFontTier {
+        ReviewFontTier(rawValueOrDefault: reviewFontTierRaw)
     }
 
     /// 组装传给引擎的配置快照（含 Keychain 里的 key）。

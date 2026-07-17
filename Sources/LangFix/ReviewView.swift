@@ -20,6 +20,9 @@ struct ReviewView: View {
     var isOverflowing: Bool = false
 
     private var theme: ReviewTheme { settings.reviewTheme }
+    /// 统一字体来源（design font-size-setting D3）：与测量树同从 `SettingsStore.shared` 派生（单一真相源），
+    /// 结构上保证两树同档位；子树逐级传参，漏传是编译错误（不用 Environment，防测量树静默 fallback）。
+    private var typography: ReviewTypography { ReviewTypography(tier: settings.reviewFontTier) }
 
     private var isResultPhase: Bool { if case .result = state.phase { return true } else { return false } }
 
@@ -45,7 +48,8 @@ struct ReviewView: View {
     }
 
     private func content(overflow: Bool) -> some View {
-        ReviewContent(state: state, theme: theme, isOverflowing: overflow, maxContentSize: maxContentSize)
+        ReviewContent(state: state, theme: theme, typography: typography,
+                      isOverflowing: overflow, maxContentSize: maxContentSize)
             .frame(maxWidth: maxContentSize.width, alignment: .leading)
     }
 }
@@ -58,9 +62,11 @@ struct ReviewMeasurementView: View {
     var onNaturalSizeChange: (CGSize) -> Void = { _ in }
 
     private var theme: ReviewTheme { settings.reviewTheme }
+    /// 与显示树同从 `SettingsStore.shared` 派生（单一真相源）：测量字号 == 显示字号，窗口高度不算错。
+    private var typography: ReviewTypography { ReviewTypography(tier: settings.reviewFontTier) }
 
     var body: some View {
-        ReviewContent(state: state, theme: theme)
+        ReviewContent(state: state, theme: theme, typography: typography)
             .frame(maxWidth: maxContentSize.width, alignment: .leading)
             .fixedSize(horizontal: false, vertical: true)
             .background(
@@ -75,6 +81,7 @@ struct ReviewMeasurementView: View {
 private struct ReviewContent: View {
     @ObservedObject var state: ReviewState
     let theme: ReviewTheme
+    let typography: ReviewTypography
     /// 结果态是否溢出上限（决定 ResultView 是否启用「中部滚动 + 底栏固定」）。measurement 态恒 false（测自然尺寸）。
     var isOverflowing: Bool = false
     var maxContentSize: CGSize = CGSize(width: ReviewWindowSizing.minWidth, height: 700)
@@ -82,25 +89,25 @@ private struct ReviewContent: View {
     @ViewBuilder var body: some View {
         switch state.phase {
         case .loading:
-            LoadingView(theme: theme,
+            LoadingView(theme: theme, typography: typography,
                         onHide: { state.onHide?() },
                         onStop: { state.onStop?() })
         case .streaming(let preview):
-            StreamingPreviewView(preview: preview, theme: theme,
+            StreamingPreviewView(preview: preview, theme: theme, typography: typography,
                                  onHide: { state.onHide?() },
                                  onStop: { state.onStop?() })
         case .stopped(let preview):
-            StoppedView(preview: preview, theme: theme,
+            StoppedView(preview: preview, theme: theme, typography: typography,
                         onHide: { state.onHide?() },
                         onClose: { state.onClose?() })
         case .error(let msg):
-            ErrorView(message: msg, theme: theme,
+            ErrorView(message: msg, theme: theme, typography: typography,
                       onRetry: { state.onRetry?() },
                       onSettings: { state.onOpenSettings?() },
                       onHide: { state.onHide?() },
                       onClose: { state.onClose?() })
         case .result(let result):
-            ResultView(state: state, result: result, theme: theme,
+            ResultView(state: state, result: result, theme: theme, typography: typography,
                        isOverflowing: isOverflowing, maxContentSize: maxContentSize,
                        onHide: { state.onHide?() },
                        onClose: { state.onClose?() })
@@ -117,14 +124,15 @@ struct ActionChip: View {
     let systemImage: String
     let tint: Color
     let theme: ReviewTheme
+    let typography: ReviewTypography
     let action: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 5) {
-                Image(systemName: systemImage).font(.system(size: 11, weight: .semibold))
-                Text(title).font(.system(size: 12.5, weight: .medium, design: .rounded))
+                Image(systemName: systemImage).font(typography.chipIconFont)
+                Text(title).font(typography.chipTitleFont)
             }
             .foregroundColor(tint)
             .padding(.horizontal, 13).padding(.vertical, 6)
@@ -147,13 +155,14 @@ struct ActionChip: View {
 /// 底部统一操作栏：左「隐藏」，右侧承载各态主操作（停止/关闭/重试等）。
 private struct ReviewActionBar<Trailing: View>: View {
     let theme: ReviewTheme
+    let typography: ReviewTypography
     let onHide: () -> Void
     @ViewBuilder let trailing: () -> Trailing
 
     var body: some View {
         HStack(spacing: 8) {
             ActionChip(title: "隐藏", systemImage: "chevron.down",
-                       tint: theme.secondaryText, theme: theme, action: onHide)
+                       tint: theme.secondaryText, theme: theme, typography: typography, action: onHide)
             Spacer(minLength: 8)
             trailing()
         }
@@ -178,21 +187,22 @@ private struct ThemedCard<Content: View>: View {
 
 private struct LoadingView: View {
     let theme: ReviewTheme
+    let typography: ReviewTypography
     let onHide: () -> Void
     let onStop: () -> Void
     var body: some View {
         VStack(spacing: 0) {
             VStack(spacing: 16) {
                 ProgressView()
-                Text("正在检查…").foregroundColor(theme.secondaryText)
+                Text("正在检查…").font(typography.bodyFont).foregroundColor(theme.secondaryText)
             }
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 24).padding(.top, 24).padding(.bottom, 16)
             Divider()
             // loading 尚无内容可保留，「停止」退化为直接关闭（onStop 内部判定）。
-            ReviewActionBar(theme: theme, onHide: onHide) {
+            ReviewActionBar(theme: theme, typography: typography, onHide: onHide) {
                 ActionChip(title: "停止", systemImage: "stop.fill",
-                           tint: theme.warning, theme: theme, action: onStop)
+                           tint: theme.warning, theme: theme, typography: typography, action: onStop)
             }
         }
     }
@@ -203,6 +213,7 @@ private struct LoadingView: View {
 private struct StreamingPreviewView: View {
     let preview: StreamingPreview
     let theme: ReviewTheme
+    let typography: ReviewTypography
     let onHide: () -> Void
     let onStop: () -> Void
 
@@ -213,20 +224,20 @@ private struct StreamingPreviewView: View {
                 ProgressView().controlSize(.small)
                 Label(preview.stage == .finalizing ? "定稿中…" : "校对预览中…",
                       systemImage: "text.cursor")
-                    .foregroundColor(theme.accent).font(.subheadline.bold())
+                    .foregroundColor(theme.accent).font(typography.headerFont)
                 Spacer()
             }
             .padding(.horizontal, 14).padding(.vertical, 10)
             Divider()
 
-            PreviewBody(preview: preview, theme: theme)
+            PreviewBody(preview: preview, theme: theme, typography: typography)
                 .padding(14)
 
             Divider()
             // 流式中：「停止」= 停止输出、保留已有内容（onStop 冻结为 .stopped）。
-            ReviewActionBar(theme: theme, onHide: onHide) {
+            ReviewActionBar(theme: theme, typography: typography, onHide: onHide) {
                 ActionChip(title: "停止", systemImage: "stop.fill",
-                           tint: theme.warning, theme: theme, action: onStop)
+                           tint: theme.warning, theme: theme, typography: typography, action: onStop)
             }
         }
     }
@@ -236,6 +247,7 @@ private struct StreamingPreviewView: View {
 private struct StoppedView: View {
     let preview: StreamingPreview
     let theme: ReviewTheme
+    let typography: ReviewTypography
     let onHide: () -> Void
     let onClose: () -> Void
 
@@ -243,19 +255,19 @@ private struct StoppedView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 Label("已停止（部分结果）", systemImage: "stop.circle")
-                    .foregroundColor(theme.warning).font(.subheadline.bold())
+                    .foregroundColor(theme.warning).font(typography.headerFont)
                 Spacer()
             }
             .padding(.horizontal, 14).padding(.vertical, 10)
             Divider()
 
-            PreviewBody(preview: preview, theme: theme)
+            PreviewBody(preview: preview, theme: theme, typography: typography)
                 .padding(14)
 
             Divider()
-            ReviewActionBar(theme: theme, onHide: onHide) {
+            ReviewActionBar(theme: theme, typography: typography, onHide: onHide) {
                 ActionChip(title: "关闭", systemImage: "xmark",
-                           tint: theme.secondaryText, theme: theme, action: onClose)
+                           tint: theme.secondaryText, theme: theme, typography: typography, action: onClose)
             }
         }
     }
@@ -266,31 +278,36 @@ private struct StoppedView: View {
 private struct PreviewBody: View {
     let preview: StreamingPreview
     let theme: ReviewTheme
+    let typography: ReviewTypography
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Text("修正预览").font(.caption).foregroundColor(theme.secondaryText)
+                    Text("修正预览").font(typography.sectionLabelFont).foregroundColor(theme.secondaryText)
                     Spacer()
+                    // 「复制」原生小按钮不缩放（controlSize 控件度量，非文本区；白名单）。
                     Button("复制") {}.controlSize(.small).disabled(true)   // 预览期禁用复制
                 }
                 ThemedCard(theme: theme) {
                     Text(preview.corrected.isEmpty ? " " : preview.corrected)
+                        .font(typography.bodyFont)
                         .textSelection(.enabled)
                         .foregroundColor(theme.primaryText)
                 }
                 if let t = preview.translationZh, !t.trimmed.isEmpty {
-                    TranslationLine(text: t, theme: theme)
+                    TranslationLine(text: t, theme: theme, typography: typography)
                 }
                 if let s = preview.summaryZh, !s.trimmed.isEmpty {
-                    Text(s).font(.caption).foregroundColor(theme.secondaryText)
+                    Text(s).font(typography.sectionLabelFont).foregroundColor(theme.secondaryText)
                 }
             }
             if !preview.issues.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("逐条说明").font(.caption).foregroundColor(theme.secondaryText)
-                    ForEach(preview.issues) { issue in IssueCard(issue: issue, theme: theme) }
+                    Text("逐条说明").font(typography.sectionLabelFont).foregroundColor(theme.secondaryText)
+                    ForEach(preview.issues) { issue in
+                        IssueCard(issue: issue, theme: theme, typography: typography)
+                    }
                 }
             }
         }
@@ -303,13 +320,14 @@ private struct HintLine: View {
     let systemImage: String
     let tint: Color
     let theme: ReviewTheme
+    let typography: ReviewTypography
     var body: some View {
         HStack(alignment: .top, spacing: 5) {
             Image(systemName: systemImage)
-                .font(.system(size: 10, weight: .semibold))
+                .font(typography.badgeSemiboldFont)
                 .foregroundColor(tint)
             Text(text)
-                .font(.caption)
+                .font(typography.sectionLabelFont)
                 .foregroundColor(theme.secondaryText)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
@@ -321,14 +339,17 @@ private struct HintLine: View {
 private struct TranslationLine: View {
     let text: String
     let theme: ReviewTheme
+    let typography: ReviewTypography
     var body: some View {
-        HintLine(text: text, systemImage: "character.book.closed", tint: theme.accent, theme: theme)
+        HintLine(text: text, systemImage: "character.book.closed", tint: theme.accent,
+                 theme: theme, typography: typography)
     }
 }
 
 private struct ErrorView: View {
     let message: String
     let theme: ReviewTheme
+    let typography: ReviewTypography
     let onRetry: () -> Void
     let onSettings: () -> Void
     let onHide: () -> Void
@@ -336,19 +357,21 @@ private struct ErrorView: View {
     var body: some View {
         VStack(spacing: 0) {
             VStack(spacing: 14) {
+                // 感叹号为装饰图标，不随字号缩放（白名单）。
                 Image(systemName: "exclamationmark.triangle").font(.largeTitle).foregroundColor(theme.error)
-                Text(message).multilineTextAlignment(.center).foregroundColor(theme.secondaryText)
+                Text(message).font(typography.bodyFont)
+                    .multilineTextAlignment(.center).foregroundColor(theme.secondaryText)
             }
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 24).padding(.top, 24).padding(.bottom, 16)
             Divider()
-            ReviewActionBar(theme: theme, onHide: onHide) {
+            ReviewActionBar(theme: theme, typography: typography, onHide: onHide) {
                 ActionChip(title: "打开设置", systemImage: "gearshape",
-                           tint: theme.secondaryText, theme: theme, action: onSettings)
+                           tint: theme.secondaryText, theme: theme, typography: typography, action: onSettings)
                 ActionChip(title: "重试", systemImage: "arrow.clockwise",
-                           tint: theme.accent, theme: theme, action: onRetry)
+                           tint: theme.accent, theme: theme, typography: typography, action: onRetry)
                 ActionChip(title: "关闭", systemImage: "xmark",
-                           tint: theme.secondaryText, theme: theme, action: onClose)
+                           tint: theme.secondaryText, theme: theme, typography: typography, action: onClose)
             }
         }
     }
@@ -358,6 +381,7 @@ private struct ResultView: View {
     @ObservedObject var state: ReviewState
     let result: ReviewResult
     let theme: ReviewTheme
+    let typography: ReviewTypography
     var isOverflowing: Bool = false
     var maxContentSize: CGSize = CGSize(width: ReviewWindowSizing.minWidth, height: 700)
     let onHide: () -> Void
@@ -424,13 +448,13 @@ private struct ResultView: View {
         HStack(spacing: 8) {
             if result.overEdited {
                 Label("AI 改动较大，请逐条核对", systemImage: "exclamationmark.triangle.fill")
-                    .foregroundColor(theme.warning).font(.subheadline.bold())
+                    .foregroundColor(theme.warning).font(typography.headerFont)
             } else if result.hasIssues {
                 Label("发现 \(result.issues.count) 处可改进", systemImage: "pencil.and.outline")
-                    .foregroundColor(theme.accent).font(.subheadline.bold())
+                    .foregroundColor(theme.accent).font(typography.headerFont)
             } else {
                 Label("无明显错误", systemImage: "checkmark.seal.fill")
-                    .foregroundColor(theme.success).font(.subheadline.bold())
+                    .foregroundColor(theme.success).font(typography.headerFont)
             }
             Spacer()
         }
@@ -440,8 +464,9 @@ private struct ResultView: View {
     private var correctedBlock: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("修正结果").font(.caption).foregroundColor(theme.secondaryText)
+                Text("修正结果").font(typography.sectionLabelFont).foregroundColor(theme.secondaryText)
                 Spacer()
+                // 「复制/已复制」原生小按钮不缩放（controlSize 控件度量，非文本区；白名单）。
                 Button(copied ? "已复制" : "复制") {
                     let pb = NSPasteboard.general
                     pb.clearContents()
@@ -452,26 +477,28 @@ private struct ResultView: View {
             }
             ThemedCard(theme: theme) {
                 Text(result.corrected)
+                    .font(typography.bodyFont)
                     .textSelection(.enabled)
                     .foregroundColor(theme.primaryText)
             }
             if !result.translationZh.trimmed.isEmpty {
-                TranslationLine(text: result.translationZh, theme: theme)
+                TranslationLine(text: result.translationZh, theme: theme, typography: typography)
             }
             if !result.summaryZh.trimmed.isEmpty {
-                Text(result.summaryZh).font(.caption).foregroundColor(theme.secondaryText)
+                Text(result.summaryZh).font(typography.sectionLabelFont).foregroundColor(theme.secondaryText)
             }
         }
     }
 
     private var diffBlock: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("改动对照").font(.caption).foregroundColor(theme.secondaryText)
+            Text("改动对照").font(typography.sectionLabelFont).foregroundColor(theme.secondaryText)
             ThemedCard(theme: theme) { styledDiff(segs) }
         }
     }
 
     /// 词级 diff 着色（删除红删除线 / 新增绿高亮），可复用给「修正结果」与「更地道说法」两处对照。
+    /// 字号在 reduce 结果 Text 上整体应用（分段样式只保留颜色/删除线/加粗），diff 随档位缩放。
     private func styledDiff(_ segments: [DiffEngine.Seg]) -> Text {
         segments.reduce(Text("")) { acc, seg in
             switch seg {
@@ -480,15 +507,16 @@ private struct ResultView: View {
             case .insert(let s): return acc + Text(s).foregroundColor(theme.success).bold()
             }
         }
+        .font(typography.bodyFont)
     }
 
     private var issuesBlock: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("逐条说明").font(.caption).foregroundColor(theme.secondaryText)
+            Text("逐条说明").font(typography.sectionLabelFont).foregroundColor(theme.secondaryText)
             // 序号来源 = ReviewResult.numberedIssues 单一解析（模型 index 有效则采用、否则位置重排；
             // 与追问上下文同源 design D1）；点击卡片注入「修正 N」引用。
             ForEach(result.numberedIssues, id: \.issue.id) { pair in
-                IssueCard(issue: pair.issue, theme: theme, index: pair.index,
+                IssueCard(issue: pair.issue, theme: theme, typography: typography, index: pair.index,
                           onReference: state.followUp != nil ? { injectReference($0) } : nil,
                           highlighted: highlightedIndex == pair.index)
             }
@@ -502,14 +530,15 @@ private struct ResultView: View {
         VStack(alignment: .leading, spacing: 8) {
             Rectangle().fill(theme.cardStroke.opacity(0.55)).frame(height: 1)
             HStack(spacing: 6) {
-                Image(systemName: "sparkles").font(.caption2)
-                Text("AI 追问").font(.caption)
+                Image(systemName: "sparkles").font(typography.badgeFont)
+                Text("AI 追问").font(typography.sectionLabelFont)
                 Spacer()
             }
             .foregroundColor(theme.secondaryText).opacity(0.72)
             if !session.turns.isEmpty || session.streaming != nil {
                 // 并入主结果同一滚动流（无内层固定高度容器）；自动滚底由外层 scrollProxy 承载（user review #2）。
-                FollowUpConversation(session: session, theme: theme, scrollProxy: proxy,
+                FollowUpConversation(session: session, theme: theme, typography: typography,
+                                     scrollProxy: proxy,
                                      onReferenceTap: { highlightPulse($0) })
             }
         }
@@ -543,19 +572,21 @@ private struct ResultView: View {
         let altSegs = DiffEngine.segments(input, alt)
         let hasDiff = !altSegs.allSatisfy { if case .same = $0 { return true } else { return false } }
         return VStack(alignment: .leading, spacing: 6) {
-            Text("更地道的整体说法（非最小改动）").font(.caption).foregroundColor(theme.secondaryText)
+            Text("更地道的整体说法（非最小改动）").font(typography.sectionLabelFont).foregroundColor(theme.secondaryText)
             ThemedCard(theme: theme) {
                 Text(alt)
+                    .font(typography.bodyFont)
                     .textSelection(.enabled)
                     .foregroundColor(theme.primaryText)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             if hasDiff {
-                Text("地道版改动对照（相对原文）").font(.caption2).foregroundColor(theme.secondaryText)
+                Text("地道版改动对照（相对原文）").font(typography.badgeFont).foregroundColor(theme.secondaryText)
                 ThemedCard(theme: theme) { styledDiff(altSegs) }
             }
             if !reason.trimmed.isEmpty {
-                HintLine(text: reason, systemImage: "sparkles", tint: theme.accent, theme: theme)
+                HintLine(text: reason, systemImage: "sparkles", tint: theme.accent,
+                         theme: theme, typography: typography)
             }
         }
     }
@@ -567,8 +598,8 @@ private struct ResultView: View {
                 // composer 上沿即时提示（引用越界 / 硬超预算），软提示不阻断（design UI-6）。
                 if let notice = session.composerNotice {
                     HStack(spacing: 5) {
-                        Image(systemName: "exclamationmark.circle").font(.caption2)
-                        Text(notice).font(.caption2)
+                        Image(systemName: "exclamationmark.circle").font(typography.badgeFont)
+                        Text(notice).font(typography.badgeFont)
                         Spacer()
                     }
                     .foregroundColor(theme.warning)
@@ -576,18 +607,18 @@ private struct ResultView: View {
                 }
                 HStack(spacing: 8) {
                     ActionChip(title: "隐藏", systemImage: "chevron.down",
-                               tint: theme.secondaryText, theme: theme, action: onHide)
+                               tint: theme.secondaryText, theme: theme, typography: typography, action: onHide)
                     composer(session)
                     ActionChip(title: "关闭", systemImage: "xmark",
-                               tint: theme.secondaryText, theme: theme, action: onClose)
+                               tint: theme.secondaryText, theme: theme, typography: typography, action: onClose)
                 }
                 .padding(.horizontal, 14).padding(.vertical, 9)
             }
         } else {
             // 无追问会话（理论上 result 态恒有；防御性回退）：主操作合并为「关闭」。
-            ReviewActionBar(theme: theme, onHide: onHide) {
+            ReviewActionBar(theme: theme, typography: typography, onHide: onHide) {
                 ActionChip(title: "关闭", systemImage: "xmark",
-                           tint: theme.secondaryText, theme: theme, action: onClose)
+                           tint: theme.secondaryText, theme: theme, typography: typography, action: onClose)
             }
         }
     }
@@ -598,7 +629,7 @@ private struct ResultView: View {
         HStack(spacing: 6) {
             TextField("追问本次修正，或输入“修正 2 …”", text: $draft)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12.5))
+                .font(typography.bubbleFont)
                 .foregroundColor(theme.primaryText)
                 .focused($composerFocused)
                 .onSubmit { submit(session) }
@@ -640,7 +671,7 @@ private struct ResultView: View {
 
     private func iconButton(_ system: String, tint: Color, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: system).font(.system(size: 13, weight: .semibold)).foregroundColor(tint)
+            Image(systemName: system).font(typography.iconActionFont).foregroundColor(tint)
                 .frame(width: 22, height: 22)
         }
         .buttonStyle(.plain)
@@ -662,6 +693,7 @@ private struct ResultView: View {
 private struct FollowUpConversation: View {
     @ObservedObject var session: FollowUpSession
     let theme: ReviewTheme
+    let typography: ReviewTypography
     /// 外层整体 ScrollView 的 proxy（user review #2：追问并入主流，不再有内层滚动容器）。可能为 nil（内容未溢出时无需滚动）。
     var scrollProxy: ScrollViewProxy? = nil
     let onReferenceTap: (Int) -> Void
@@ -671,18 +703,19 @@ private struct FollowUpConversation: View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(session.turns) { turn in
                 UserBubble(text: turn.question, refs: turn.referencedIndices,
-                           theme: theme, onReferenceTap: onReferenceTap)
-                AIBubble(text: turn.answer, streaming: false, theme: theme)
+                           theme: theme, typography: typography, onReferenceTap: onReferenceTap)
+                AIBubble(text: turn.answer, streaming: false, theme: theme, typography: typography)
             }
             if let s = session.streaming {
                 UserBubble(text: s.question, refs: s.referencedIndices,
-                           theme: theme, onReferenceTap: onReferenceTap)
+                           theme: theme, typography: typography, onReferenceTap: onReferenceTap)
                 switch s.stage {
                 case .failed:
-                    FailedBubble(message: s.errorText ?? "回答中断", theme: theme) { session.retry() }
+                    FailedBubble(message: s.errorText ?? "回答中断",
+                                 theme: theme, typography: typography) { session.retry() }
                 case .receiving, .finalizing:
                     AIBubble(text: s.answer.isEmpty ? "正在回答…" : s.answer,
-                             streaming: true, theme: theme)
+                             streaming: true, theme: theme, typography: typography)
                 }
             }
             Color.clear.frame(height: 1).id(Self.bottomID)
@@ -707,6 +740,7 @@ private struct FollowUpConversation: View {
 private struct ReferenceChips: View {
     let refs: [Int]
     let theme: ReviewTheme
+    let typography: ReviewTypography
     let onTap: (Int) -> Void
     var body: some View {
         if !refs.isEmpty {
@@ -714,7 +748,7 @@ private struct ReferenceChips: View {
                 ForEach(refs, id: \.self) { n in
                     Button { onTap(n) } label: {
                         Text("修正 \(n)")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(typography.badgeSemiboldFont)
                             .foregroundColor(theme.accent)
                             .padding(.horizontal, 5).padding(.vertical, 1)
                             .background(theme.accent.opacity(0.14))
@@ -732,14 +766,15 @@ private struct UserBubble: View {
     let text: String
     let refs: [Int]
     let theme: ReviewTheme
+    let typography: ReviewTypography
     let onReferenceTap: (Int) -> Void
     var body: some View {
         HStack {
             Spacer(minLength: 40)
             VStack(alignment: .trailing, spacing: 3) {
-                ReferenceChips(refs: refs, theme: theme, onTap: onReferenceTap)
+                ReferenceChips(refs: refs, theme: theme, typography: typography, onTap: onReferenceTap)
                 Text(text)
-                    .font(.system(size: 12.5))
+                    .font(typography.bubbleFont)
                     .foregroundColor(theme.primaryText)
                     .textSelection(.enabled)
                     .padding(.horizontal, 10).padding(.vertical, 7)
@@ -754,11 +789,12 @@ private struct AIBubble: View {
     let text: String
     let streaming: Bool
     let theme: ReviewTheme
+    let typography: ReviewTypography
     var body: some View {
         // 固定对齐宽度（user review #3）：AI 气泡统一左对齐、填满可用宽度，不随单次回答长短抖动。
         HStack(alignment: .bottom, spacing: 2) {
-            MarkdownText(raw: text, theme: theme)
-            if streaming { TypingCursor(theme: theme) }
+            MarkdownText(raw: text, theme: theme, typography: typography)
+            if streaming { TypingCursor(theme: theme, typography: typography) }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 10).padding(.vertical, 7)
@@ -772,16 +808,17 @@ private struct AIBubble: View {
 private struct FailedBubble: View {
     let message: String
     let theme: ReviewTheme
+    let typography: ReviewTypography
     let onRetry: () -> Void
     var body: some View {
         // 与 AI 气泡同宽（左对齐填满），保持视觉一致（user review #3）。
         VStack(alignment: .leading, spacing: 6) {
             Label("回答中断", systemImage: "exclamationmark.triangle.fill")
-                .font(.caption.bold()).foregroundColor(theme.error)
-            Text(message).font(.caption).foregroundColor(theme.secondaryText)
+                .font(typography.sectionLabelBoldFont).foregroundColor(theme.error)
+            Text(message).font(typography.sectionLabelFont).foregroundColor(theme.secondaryText)
                 .fixedSize(horizontal: false, vertical: true)
             ActionChip(title: "重试", systemImage: "arrow.clockwise",
-                       tint: theme.accent, theme: theme, action: onRetry)
+                       tint: theme.accent, theme: theme, typography: typography, action: onRetry)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -794,11 +831,13 @@ private struct FailedBubble: View {
 /// 流式打字机光标：细竖条，0.8s 闪烁（design UI-4）。
 private struct TypingCursor: View {
     let theme: ReviewTheme
+    let typography: ReviewTypography
     @State private var on = true
     var body: some View {
         RoundedRectangle(cornerRadius: 1)
             .fill(theme.accent.opacity(on ? 0.9 : 0.1))
-            .frame(width: 2, height: 14)
+            // 光标高跟随气泡字号缩放（bubble + 1.5，standard 档还原旧值 14），保持与文字等高观感。
+            .frame(width: 2, height: typography.bubble + 1.5)
             .onAppear {
                 withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) { on.toggle() }
             }
@@ -809,9 +848,10 @@ private struct TypingCursor: View {
 private struct MarkdownText: View {
     let raw: String
     let theme: ReviewTheme
+    let typography: ReviewTypography
     var body: some View {
         Text(attributed)
-            .font(.system(size: 12.5))
+            .font(typography.bubbleFont)
             .foregroundColor(theme.primaryText)
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
@@ -826,6 +866,7 @@ private struct MarkdownText: View {
 private struct IssueCard: View {
     let issue: Issue
     let theme: ReviewTheme
+    let typography: ReviewTypography
     /// 1-based 稳定序号（design D1）。`nil` = 流式预览态，不渲染可引用序号（spec「预览期不开放序号」）。
     var index: Int? = nil
     /// 点击卡片右上「引用」按钮把「修正 N」注入追问输入框（design UI-3；user adj#4 改为显式按钮，
@@ -840,7 +881,7 @@ private struct IssueCard: View {
             HStack(spacing: 6) {
                 if let index {
                     Text("修正 \(index)")
-                        .font(.caption2.bold())
+                        .font(typography.badgeBoldFont)
                         .foregroundColor(theme.accent)
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(theme.accent.opacity(0.16))
@@ -848,19 +889,19 @@ private struct IssueCard: View {
                         .cornerRadius(5)
                 }
                 Text(issue.category.badge)
-                    .font(.caption2.bold())
+                    .font(typography.badgeBoldFont)
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .background(theme.accent.opacity(0.15))
                     .cornerRadius(4)
                 Text(issue.severity.badge)
-                    .font(.caption2)
+                    .font(typography.badgeFont)
                     .foregroundColor(severityColor)
                 Spacer()
                 // 引用改为显式按钮（user adj#4）：卡片正文文字要可选中复制，不能再让「整卡 tap」抢走选择手势。
                 if let index, let onReference {
                     Button { onReference(index) } label: {
                         Image(systemName: "quote.bubble")
-                            .font(.caption2)
+                            .font(typography.badgeFont)
                             .foregroundColor(theme.accent.opacity(hovering ? 1 : 0.7))
                     }
                     .buttonStyle(.plain)
@@ -869,11 +910,11 @@ private struct IssueCard: View {
             }
             HStack(spacing: 4) {
                 Text(issue.before).strikethrough().foregroundColor(theme.error)
-                Image(systemName: "arrow.right").font(.caption2).foregroundColor(theme.secondaryText)
+                Image(systemName: "arrow.right").font(typography.badgeFont).foregroundColor(theme.secondaryText)
                 Text(issue.after).foregroundColor(theme.success)
             }
-            .font(.callout)
-            Text(issue.reasonZh).font(.caption).foregroundColor(theme.secondaryText)
+            .font(typography.issueLineFont)
+            Text(issue.reasonZh).font(typography.sectionLabelFont).foregroundColor(theme.secondaryText)
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -913,6 +954,7 @@ struct CollapsedReviewEntry: View {
             HStack(spacing: 8) {
                 Image(systemName: status.iconName)
                     .symbolEffectPulseIfWorking(status == .working)
+                // 胶囊 148×44 固定 frame，字号缩放会截断；非「结果浮窗文本区」，不随档位缩放（白名单）。
                 Text(status.title)
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                 if behavior == .alwaysOnTop {

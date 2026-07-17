@@ -100,6 +100,16 @@ struct SettingsView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
             }
+            // 字号档位：作用域仅结果浮窗文本区（设置页自身不缩放）；切换即时生效，同主题机制。
+            field("字号（结果浮窗）") {
+                Picker("字号", selection: $settings.reviewFontTierRaw) {
+                    ForEach(ReviewFontTier.allCases) { t in
+                        Text(t.displayName).tag(t.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
             windowBehaviorSection
             Toggle("流式渲染（逐字预览，端点不支持时自动回退）", isOn: $settings.streamingEnabled)
             Toggle("登录时启动（常驻，消除冷启动延迟）", isOn: $launchAtLogin)
