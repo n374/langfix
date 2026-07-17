@@ -58,10 +58,10 @@ enum AppLanguage: String, Codable, CaseIterable, Sendable {
 
 | 条件（`languageConfigured` 键不存在时） | 判定 | 动作 |
 |---|---|---|
-| **存在任一旧版使用痕迹**：任一 v1 已知 UserDefaults 键有持久化值（`d.object(forKey:) != nil`，键集 = `SettingsStore.K` 全量）**或** Keychain 存有 API key | 老用户升级 | 写入 用户=中、目标=英、`languageConfigured=true`（等价现状，不打断） |
+| **存在任一旧版使用痕迹**：任一 v1 已知 UserDefaults 键有持久化值（经 `persistentDomain(forName:)` 只查**落盘域**，不得用 `object(forKey:)`——后者会命中进程全局 registration domain 的注册默认值，把新装误判为老用户；空域返回 nil 按新装处理。MR 复验缺陷修复，回归锚 `testMigrationImmuneToRegistrationDomainPollution`）**或** Keychain 存有 API key | 老用户升级 | 写入 用户=中、目标=英、`languageConfigured=true`（等价现状，不打断） |
 | 无任何旧版痕迹 | 新装 | 按 locale truth table **预填**（`register(defaults:)` 或显式写入），`languageConfigured=false` |
 
-- 老用户信号取「任一持久化键 ∨ Keychain key」的宽口径（评审 R1-4 采纳）：与 spec「老用户升级（无语言配置键）→ 自动迁移」的语义对齐——只要装过旧版且留下任何配置痕迹即算老用户，杜绝「配过主题没配端点」这类用户被误判为新装。`register(defaults:)` 不落盘、不会误报；键集与 `SettingsStore.K` 同源（新增键不需回填此清单，只判 v1 存量键集常量，冻结为 `K.legacyV1Keys`）。完全零痕迹的安装按新装处理。
+- 老用户信号取「任一持久化键 ∨ Keychain key」的宽口径（评审 R1-4 采纳）：与 spec「老用户升级（无语言配置键）→ 自动迁移」的语义对齐——只要装过旧版且留下任何配置痕迹即算老用户，杜绝「配过主题没配端点」这类用户被误判为新装。`register(defaults:)` 的注册默认不落盘，`persistentDomain` 探测天然不会把它误报为使用痕迹（注意：`object(forKey:)` **会**命中注册默认——这正是 MR 复验发现的误判根源，勿改回）；键集与 `SettingsStore.K` 同源（新增键不需回填此清单，只判 v1 存量键集常量，冻结为 `K.legacyV1Keys`）。完全零痕迹的安装按新装处理。
 - locale 判定为纯函数 `LanguagePolicy.defaults(forLocaleIdentifier:) -> (user: AppLanguage, target: AppLanguage)`：前缀 `zh`→(中,英)；`en`→(英,中)；其他→(英,中)。与 proposal §5 truth table 一一对应，直接单测。
 - `languageConfigured` 一旦为 true 永不回退；用户之后随时可改语言。
 
