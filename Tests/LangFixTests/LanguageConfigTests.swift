@@ -65,7 +65,8 @@ final class LanguageMigrationTests: XCTestCase {
     func testLegacyUserMigratesToConfiguredZhEn() {
         let d = freshSuite("langfix.test.migrate.legacy")
         d.set("https://x/v1", forKey: "baseURL")   // 旧版使用痕迹
-        SettingsStore.migrateLanguageIfNeeded(defaults: d, localeIdentifier: "en-US", hasLegacyKeychainKey: false)
+        SettingsStore.migrateLanguageIfNeeded(defaults: d, persistentDomainName: "langfix.test.migrate.legacy",
+                                              localeIdentifier: "en-US", hasLegacyKeychainKey: false)
         XCTAssertEqual(d.string(forKey: "userLanguage"), "zh", "老用户迁移恒为 用户=中（truth table 最后一行，与 locale 无关）")
         XCTAssertEqual(d.string(forKey: "targetLanguage"), "en")
         XCTAssertTrue(d.bool(forKey: "languageConfigured"), "老用户视为已配置，不强制 onboarding")
@@ -75,7 +76,8 @@ final class LanguageMigrationTests: XCTestCase {
     // 老用户宽口径（评审 R1-4）：仅 Keychain 有 key、无任何 defaults 键 → 仍判老用户。
     func testKeychainOnlyLegacySignalCountsAsLegacy() {
         let d = freshSuite("langfix.test.migrate.keychain")
-        SettingsStore.migrateLanguageIfNeeded(defaults: d, localeIdentifier: "zh-Hans", hasLegacyKeychainKey: true)
+        SettingsStore.migrateLanguageIfNeeded(defaults: d, persistentDomainName: "langfix.test.migrate.keychain",
+                                              localeIdentifier: "zh-Hans", hasLegacyKeychainKey: true)
         XCTAssertTrue(d.bool(forKey: "languageConfigured"))
         XCTAssertEqual(d.string(forKey: "userLanguage"), "zh")
         d.removePersistentDomain(forName: "langfix.test.migrate.keychain")
@@ -86,7 +88,8 @@ final class LanguageMigrationTests: XCTestCase {
         for (locale, user, target) in [("zh-Hans-CN", "zh", "en"), ("en-GB", "en", "zh"), ("ja-JP", "en", "zh")] {
             let name = "langfix.test.migrate.fresh.\(locale)"
             let d = freshSuite(name)
-            SettingsStore.migrateLanguageIfNeeded(defaults: d, localeIdentifier: locale, hasLegacyKeychainKey: false)
+            SettingsStore.migrateLanguageIfNeeded(defaults: d, persistentDomainName: name,
+                                                  localeIdentifier: locale, hasLegacyKeychainKey: false)
             XCTAssertEqual(d.string(forKey: "userLanguage"), user, locale)
             XCTAssertEqual(d.string(forKey: "targetLanguage"), target, locale)
             XCTAssertFalse(d.bool(forKey: "languageConfigured"), "新装未确认前不算已配置")
@@ -95,15 +98,33 @@ final class LanguageMigrationTests: XCTestCase {
         }
     }
 
+    // MR 复验缺陷回归锚：registration domain 为进程全局，被其他套件的 register(defaults:) 污染后
+    // （temperature 等恰是 legacyV1Keys 成员），新装判定必须不受影响——探测只看 persistentDomain。
+    func testMigrationImmuneToRegistrationDomainPollution() {
+        let name = "langfix.test.migrate.pollution"
+        let d = freshSuite(name)
+        // 显式重现串行测试进程的真实污染：注册与 legacyV1Keys 同名的默认值（进程全局生效）。
+        d.register(defaults: ["temperature": 0.2, "maxChars": 4000])
+        XCTAssertNotNil(d.object(forKey: "temperature"), "前置确认：object(forKey:) 确实会命中注册默认（污染成立）")
+        SettingsStore.migrateLanguageIfNeeded(defaults: d, persistentDomainName: name,
+                                              localeIdentifier: "en-GB", hasLegacyKeychainKey: false)
+        XCTAssertFalse(d.bool(forKey: "languageConfigured"), "注册默认不得把新装误判为老用户")
+        XCTAssertEqual(d.string(forKey: "userLanguage"), "en", "仍按 locale 预填（新装分支）")
+        XCTAssertEqual(d.string(forKey: "targetLanguage"), "zh")
+        d.removePersistentDomain(forName: name)
+    }
+
     // 幂等：languageConfigured 键已存在（无论 true/false）→ 不再改写语言键。
     func testMigrationIdempotent() {
         let d = freshSuite("langfix.test.migrate.idempotent")
-        SettingsStore.migrateLanguageIfNeeded(defaults: d, localeIdentifier: "zh-Hans", hasLegacyKeychainKey: false)
+        SettingsStore.migrateLanguageIfNeeded(defaults: d, persistentDomainName: "langfix.test.migrate.idempotent",
+                                              localeIdentifier: "zh-Hans", hasLegacyKeychainKey: false)
         // 用户手动改为 英/中 后再次启动（此时还写入了 baseURL）：不得被迁移覆盖回 中/英。
         d.set("en", forKey: "userLanguage")
         d.set("zh", forKey: "targetLanguage")
         d.set("https://x/v1", forKey: "baseURL")
-        SettingsStore.migrateLanguageIfNeeded(defaults: d, localeIdentifier: "zh-Hans", hasLegacyKeychainKey: true)
+        SettingsStore.migrateLanguageIfNeeded(defaults: d, persistentDomainName: "langfix.test.migrate.idempotent",
+                                              localeIdentifier: "zh-Hans", hasLegacyKeychainKey: true)
         XCTAssertEqual(d.string(forKey: "userLanguage"), "en", "已有 languageConfigured 键 → 迁移不再执行")
         XCTAssertEqual(d.string(forKey: "targetLanguage"), "zh")
         d.removePersistentDomain(forName: "langfix.test.migrate.idempotent")

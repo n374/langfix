@@ -76,10 +76,11 @@ final class SettingsStore: ObservableObject {
     }
 
     private init() {
-        // 语言迁移必须**早于 register(defaults:)**：register 后 `object(forKey:)` 会命中 registration domain，
-        // 无法再区分「用户真写过」与「注册默认」，老用户判定会被污染（design D2）。
+        // 语言迁移早于 register(defaults:) 执行；且 v1 键探测经 persistentDomain 只看落盘值（见
+        // migrateLanguageIfNeeded 注释），双重保证老用户判定不被注册默认污染（design D2）。
         Self.migrateLanguageIfNeeded(
             defaults: d,
+            persistentDomainName: Bundle.main.bundleIdentifier,
             localeIdentifier: Locale.preferredLanguages.first ?? Locale.current.identifier,
             hasLegacyKeychainKey: KeychainStore.hasAPIKey)
         d.register(defaults: [
@@ -120,11 +121,32 @@ final class SettingsStore: ObservableObject {
 
     /// 一次性确定性语言迁移（design D2，幂等：仅 `languageConfigured` 键不存在时执行）。
     /// 抽为可注入 defaults 的静态函数以便测试；老用户信号 = 任一 v1 持久化键 ∨ Keychain API key（宽口径，评审 R1-4）。
+    ///
+    /// **v1 键探测必须只看真正落盘的持久化值，不得用 `object(forKey:)`**（MR 阶段复验缺陷修复）：
+    /// registration domain 是**进程全局**的（跨 UserDefaults 实例共享），任何早于本迁移执行的
+    /// `register(defaults:)`（如测试进程里其他套件先触碰了 `SettingsStore.shared`）都会让 `object(forKey:)`
+    /// 误命中注册默认值（temperature/maxChars 等恰是 legacyV1Keys 成员），把全新安装误判成老用户。
+    /// 探测用 `persistentDomain(forName:)`：**实测**（本机 Foundation，回归锚
+    /// `testMigrationImmuneToRegistrationDomainPollution` 持续验证）它只返回落盘域、不含注册默认；
+    /// 注意其**空域返回 nil 而非空字典**——nil 必须按「无任何落盘值 = 新装」处理，绝不能因 nil 回退到
+    /// `object(forKey:)`（否则污染照旧漏进来，这正是上一版实现的 bug）。
+    /// `CFPreferencesCopyAppValue` 不可用作替代：实测其搜索链会命中 register 的默认值。
+    /// `persistentDomainName` 为 nil（非 bundle 环境兜底）时退回 `object(forKey:)`，此时正确性仍由
+    /// init 内「迁移先于 register」的固定顺序保证。
     static func migrateLanguageIfNeeded(defaults d: UserDefaults,
+                                        persistentDomainName: String?,
                                         localeIdentifier: String,
                                         hasLegacyKeychainKey: Bool) {
+        // languageConfigured 从不进 register(defaults:)，object(forKey:) 判定其存在性恒准确。
         guard d.object(forKey: K.languageConfigured) == nil else { return }
-        let hasLegacyTrace = K.legacyV1Keys.contains { d.object(forKey: $0) != nil } || hasLegacyKeychainKey
+        let hasPersistedKey: (String) -> Bool
+        if let domain = persistentDomainName {
+            let persisted = d.persistentDomain(forName: domain) ?? [:]   // nil = 域内无任何落盘值（新装）
+            hasPersistedKey = { persisted[$0] != nil }
+        } else {
+            hasPersistedKey = { d.object(forKey: $0) != nil }
+        }
+        let hasLegacyTrace = K.legacyV1Keys.contains(where: hasPersistedKey) || hasLegacyKeychainKey
         if hasLegacyTrace {
             // 老用户升级：自动迁移为 用户=中、目标=英、已配置（等价现状行为，不打断；truth table 最后一行）。
             d.set(AppLanguage.chinese.rawValue, forKey: K.userLanguage)
