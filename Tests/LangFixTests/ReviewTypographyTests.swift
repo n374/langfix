@@ -116,7 +116,14 @@ final class ReviewTypographyTests: XCTestCase {
 
     /// 只改 `SettingsStore.shared.reviewFontTierRaw`、泵主 runloop——不手动强制测量——断言窗口经
     /// `$reviewFontTierRaw → refreshMeasurement` 生产链路重测量：自然高变大、isOverflowing 翻转、高度封顶。
-    /// 内容长度按 Codex 备注选「standard 未溢出、xLarge 溢出」区间（逐行搜索次极高内容，带宽 ≫ 单行高必命中）。
+    ///
+    /// 环境鲁棒性（首次 CI 红的两条教训，见 PR #5 首次 Actions 失败）：
+    /// 1. 内容长度**两端实测**——「standard 实测不溢出 && xLarge 实测明确溢出」。不得用「×1.231 理论缩放」
+    ///    推断 xLarge 必溢出：header/footer/padding 等常数部分不随字号缩放，CI 720p 小虚拟屏（maxH≈477）
+    ///    带内行数少、常数占比大，带下沿内容 xLarge 后可能仍 ≤ maxH——此时 isOverflowing==false 是正确
+    ///    判定而非链路缺陷，而未溢出分支的显示树（fixedSize 全高）会经 autolayout 把 panel 撑到非受控高度。
+    /// 2. 切档后**轮询等待收敛**（≤8s）——固定 0.16s 泵在慢环境不保证 async refreshMeasurement 与
+    ///    SwiftUI/autolayout 布局竞争完成；收敛判据即断言目标态，超时才落到硬断言并输出收敛轨迹诊断。
     @MainActor
     func testFontTierChangeTriggersRemeasureAndCapsViaProductionPath() throws {
         _ = NSApplication.shared
@@ -136,29 +143,66 @@ final class ReviewTypographyTests: XCTestCase {
         controller.showCentered()
         defer { controller.close() }
 
-        let maxH = controller.measureAndApplyForTesting().maxContent.height
-        // standard 自然高落入 (0.85, 0.97)·maxH → xLarge（×≈1.23）后必 > maxH，翻转断言确定成立。
-        var standardSnapshot: ReviewWindowController.MeasurementSnapshot?
-        for lines in 1...200 {
+        let limits = controller.measureAndApplyForTesting().maxContent
+        let maxH = limits.height
+
+        // 估算 standard 档单行高，直接跳到 ~0.75·maxH 对应行数起搜（省掉从 1 行起的重度测量）。
+        state.phase = .streaming(StreamingPreview(corrected: Self.longText(lines: 8)))
+        let h8 = controller.measureAndApplyForTesting().natural.height
+        state.phase = .streaming(StreamingPreview(corrected: Self.longText(lines: 24)))
+        let h24 = controller.measureAndApplyForTesting().natural.height
+        let lineH = max((h24 - h8) / 16, 1)
+        let start = max(1, 24 + Int((maxH * 0.75 - h24) / lineH))
+
+        // 逐行加内容：standard 实测 ≤ 0.97·maxH（不溢出）且同内容 xLarge 实测 > maxH+10（明确溢出）才采用。
+        // xLarge 端用与 refreshMeasurement 相同的 sizeThatFits 路径、相同测量宽度实测，不做比例推断。
+        var chosenLines = 0
+        for lines in start...(start + 80) {
             state.phase = .streaming(StreamingPreview(corrected: Self.longText(lines: lines)))
             let snap = controller.measureAndApplyForTesting()
-            if snap.natural.height > maxH * 0.85 && snap.natural.height < maxH * 0.97 {
-                standardSnapshot = snap
+            guard snap.natural.height <= maxH * 0.97 else { break }   // standard 端已到顶仍未两全
+            guard snap.natural.height > maxH * 0.6 else { continue }
+            let xlNatural = Self.withTier(.xLarge) {
+                Self.measuredNaturalHeight(state: state, width: limits.width, maxHeight: maxH)
+            }
+            if xlNatural > maxH + 10 {
+                chosenLines = lines
                 break
             }
-            if snap.natural.height >= maxH { break }   // 已触顶仍未落带（异常屏），停止搜索
         }
-        let standard = try XCTUnwrap(standardSnapshot, "未能构造出「standard 不溢出」的次极高内容")
-        XCTAssertFalse(standard.isOverflowing, "standard 档基线必须尚未溢出（翻转断言的前提）")
-
-        store.reviewFontTierRaw = ReviewFontTier.xLarge.rawValue
+        guard chosenLines > 0 else {
+            XCTFail("未能构造出「standard 实测不溢出、xLarge 实测溢出」的内容（maxH=\(maxH), lineH≈\(lineH), start=\(start)）")
+            return
+        }
+        // withTier 期间的两次切档会在 controller 订阅里排队 async 任务；先泵空队列、重确立 standard 基线，
+        // 保证正式切档前状态干净（排队任务读到的已是恢复后的 standard，refreshMeasurement 幂等）。
         settleMainRunLoop()
-        let xl = controller.measurementSnapshotForTesting()
-        XCTAssertGreaterThan(xl.natural.height, standard.natural.height + 20,
-                             "改档位后未经手动强制测量，自然高度应经订阅链路自动变大")
-        XCTAssertTrue(xl.isOverflowing, "xLarge 下内容超 maxH 必翻 isOverflowing（中部滚动、底栏固定）")
+        let baseline = controller.measureAndApplyForTesting()
+        XCTAssertFalse(baseline.isOverflowing, "standard 档基线必须尚未溢出（翻转断言的前提）")
+
+        // 正式生产路径：只改档位，不手动触发测量，轮询等待订阅链路收敛。
+        store.reviewFontTierRaw = ReviewFontTier.xLarge.rawValue
+        var xl = controller.measurementSnapshotForTesting()
+        var trace: [String] = []
+        let deadline = Date(timeIntervalSinceNow: 8)
+        repeat {
+            settleMainRunLoop(iterations: 2)
+            xl = controller.measurementSnapshotForTesting()
+            trace.append(String(format: "nat=%.1f applied=%.1f max=%.1f ovf=%d",
+                                xl.natural.height, xl.appliedContent.height,
+                                xl.maxContent.height, xl.isOverflowing ? 1 : 0))
+            if xl.isOverflowing,
+               xl.natural.height > baseline.natural.height + 20,
+               abs(xl.appliedContent.height - xl.maxContent.height) <= 2 { break }
+        } while Date() < deadline
+        let diag = "lines=\(chosenLines) std=\(baseline.natural.height) 收敛轨迹(末8帧): "
+            + trace.suffix(8).joined(separator: " | ")
+
+        XCTAssertGreaterThan(xl.natural.height, baseline.natural.height + 20,
+                             "改档位后未经手动强制测量，自然高度应经订阅链路自动变大。\(diag)")
+        XCTAssertTrue(xl.isOverflowing, "xLarge 下内容超 maxH 必翻 isOverflowing（中部滚动、底栏固定）。\(diag)")
         XCTAssertEqual(xl.appliedContent.height, xl.maxContent.height, accuracy: 2,
-                       "窗口内容高度必须封顶在 maxH，不随字号放大超屏")
+                       "窗口内容高度必须封顶在 maxH，不随字号放大超屏。\(diag)")
     }
 
     // MARK: 工具
@@ -187,12 +231,14 @@ final class ReviewTypographyTests: XCTestCase {
     }
 
     /// 与 `ReviewWindowController.refreshMeasurement` 相同的测量路径（NSHostingController.sizeThatFits）。
+    /// width/maxHeight 需与被对照的测量一致（生产用 `currentMaxContentSize()`，随所在屏变化）。
     @MainActor
-    private static func measuredNaturalHeight(state: ReviewState) -> CGFloat {
-        let width = ReviewWindowSizing.minWidth
+    private static func measuredNaturalHeight(state: ReviewState,
+                                              width: CGFloat = ReviewWindowSizing.minWidth,
+                                              maxHeight: CGFloat = 700) -> CGFloat {
         let controller = NSHostingController(rootView: ReviewMeasurementView(
             state: state,
-            maxContentSize: CGSize(width: width, height: 700),
+            maxContentSize: CGSize(width: width, height: maxHeight),
             onNaturalSizeChange: { _ in }))
         controller.view.frame = NSRect(x: 0, y: 0, width: width, height: 1)
         controller.view.layoutSubtreeIfNeeded()
