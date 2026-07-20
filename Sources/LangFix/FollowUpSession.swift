@@ -54,7 +54,7 @@ final class FollowUpSession: ObservableObject {
             FollowUpContext.NumberedIssue(
                 index: idx, before: issue.before, after: issue.after,
                 category: issue.category.rawValue, severity: issue.severity.rawValue,
-                reasonZh: issue.reasonZh)
+                reason: issue.reason)
         }
     }
 
@@ -71,13 +71,14 @@ final class FollowUpSession: ObservableObject {
         guard !isBusy else { return }   // 一次只允许一轮在途（UI 也会把发送键切成停止）
 
         // 引用序号本地校验（design D4，spec「引用不存在的序号」）：越界 → 不调 AI、不写 turns。
-        let refs = Self.parseReferences(question)
+        let lang = configSnapshot.userLanguage
+        let refs = Self.parseReferences(question, language: lang)
         let count = boundResult.issues.count
         let invalid = refs.filter { $0 < 1 || $0 > count }
         if !invalid.isEmpty {
             composerNotice = count == 0
-                ? "本次结果没有可引用的修正"
-                : "修正 \(invalid.map(String.init).joined(separator: "、")) 不存在，可引用 1–\(count)"
+                ? L10n.t(.followUpNoReferencable, lang)
+                : L10n.invalidReference(invalid, count: count, lang)
             return
         }
         startTurn(question: question, refs: refs)
@@ -119,13 +120,14 @@ final class FollowUpSession: ObservableObject {
 
     private func startTurn(question: String, refs: [Int]) {
         // 预算裁剪：base 恒保留（含完整带序号修正 + 当前问题）；仅裁剪最旧历史；base 超预算 → fail loud。
+        let lang = configSnapshot.userLanguage
         guard let ctx = Self.assembleWithinBudget(
-            original: original, corrected: boundResult.corrected, summaryZh: boundResult.summaryZh,
+            original: original, corrected: boundResult.corrected, summary: boundResult.summary,
             numberedIssues: numberedIssues, allHistory: turns, question: question,
-            budgetTokens: configSnapshot.followUpBudgetTokens
+            budgetTokens: configSnapshot.followUpBudgetTokens, user: lang
         ) else {
             // fail loud（正确性红线 design D5）：绝不静默截断致「修正 N」失去绑定。
-            composerNotice = "本次结果与问题过长，超出可用上下文预算，请缩短问题或重新纠错后再追问"
+            composerNotice = L10n.t(.followUpBudgetOverflow, lang)
             return
         }
 
@@ -144,19 +146,22 @@ final class FollowUpSession: ObservableObject {
                 guard let self, self.askGeneration == myAsk, !self.isClosed, !Task.isCancelled else { return }
                 guard var s = self.streaming, s.stage == .receiving else { return }
                 rawBox.value += delta
-                s.answer = Self.applyOutputGuard(answer: rawBox.value, corrected: corrected)   // 边流边护栏
+                // 边流边护栏（评审#2；D10 增强：同时比对追问内长文本块）。
+                s.answer = Self.applyOutputGuard(answer: rawBox.value, corrected: corrected,
+                                                 question: question, language: lang)
                 self.streaming = s
             }
             do {
                 let answer = try await provider.followUpStreaming(context: ctx, config: cfg, onDelta: onDelta)
                 guard let self, self.askGeneration == myAsk, !self.isClosed, !Task.isCancelled else { return }
                 self.inFlightTask = nil         // 完成即释放 Task（连带释放捕获的含 key 的 cfg，评审#5）
-                // 应用层输出护栏（design D6 ③）：拦「整段替代全文」，不当作可采纳结果呈现。
-                let guarded = Self.applyOutputGuard(answer: answer, corrected: corrected)
+                // 应用层输出护栏（design D6 ③；D10 增强：同时比对追问内长文本块）：拦「整段替代全文」。
+                let guarded = Self.applyOutputGuard(answer: answer, corrected: corrected,
+                                                    question: question, language: lang)
                 // 正确性红线（评审#1）：空回答不当成功提交。
                 guard !guarded.trimmed.isEmpty else {
                     self.streaming = StreamingAnswer(question: question, answer: "", referencedIndices: refs,
-                                                     stage: .failed, errorText: ReviewError.truncated.errorDescription)
+                                                     stage: .failed, errorText: ReviewError.truncated.localizedText(lang))
                     return
                 }
                 self.turns.append(FollowUpTurn(question: question, answer: guarded, referencedIndices: refs))
@@ -165,7 +170,7 @@ final class FollowUpSession: ObservableObject {
                 guard let self, self.askGeneration == myAsk, !self.isClosed, !Task.isCancelled else { return }
                 self.inFlightTask = nil         // 失败即释放 Task（同上）
                 if case ReviewError.cancelled = error { return }   // cancel 由 cancelInFlight 处理，不覆盖
-                let msg = (error as? ReviewError)?.errorDescription ?? error.localizedDescription
+                let msg = (error as? ReviewError)?.localizedText(lang) ?? error.localizedDescription
                 // 失败轮：保留问题（不留 partial，避免半截替代全文残留），标 failed + 错误文案；**不入 turns**、可重试。
                 self.streaming = StreamingAnswer(question: question, answer: "",
                                                  referencedIndices: refs, stage: .failed, errorText: msg)
@@ -178,8 +183,14 @@ final class FollowUpSession: ObservableObject {
 
     // MARK: - 纯函数（可单测）
 
-    /// 解析问题中的「修正 N」引用，返回去重升序的 1-based 序号。
-    nonisolated static func parseReferences(_ q: String) -> [Int] {
+    /// 解析问题中的修正引用，返回去重升序的 1-based 序号。token 集随用户语言（language-config design D11）：
+    /// 中文识别「修正 N」；英文识别 "fix N" / "correction N"（大小写不敏感）。跨语言 token 不识别——
+    /// UI badge、prompt 上下文编号标签、本解析器三者同源同语言，杜绝「输入 fix 2 却校验不到」的缺口。
+    nonisolated static func parseReferences(_ q: String, language: AppLanguage) -> [Int] {
+        language == .chinese ? parseReferencesZh(q) : parseReferencesEn(q)
+    }
+
+    nonisolated private static func parseReferencesZh(_ q: String) -> [Int] {
         var found = Set<Int>()
         // 匹配「修正」后可跟空白，再跟数字。
         let scalars = Array(q)
@@ -199,6 +210,18 @@ final class FollowUpSession: ObservableObject {
         return found.sorted()
     }
 
+    nonisolated private static func parseReferencesEn(_ q: String) -> [Int] {
+        // \b 词边界防 "prefix2"、"suffixfix 3" 误判；大小写不敏感。
+        guard let re = try? NSRegularExpression(pattern: "\\b(?:fix|correction)\\s*(\\d+)",
+                                                options: [.caseInsensitive]) else { return [] }
+        var found = Set<Int>()
+        let ns = q as NSString
+        for m in re.matches(in: q, range: NSRange(location: 0, length: ns.length)) {
+            if m.numberOfRanges > 1, let n = Int(ns.substring(with: m.range(at: 1))) { found.insert(n) }
+        }
+        return found.sorted()
+    }
+
     /// 保守 token 估算（design D5）：utf8 字节 / K，K 取保守值使 CJK/混排偏保守（宁可更早 fail loud）。
     nonisolated static let estTokenDivisor = 2.5
     nonisolated static func estimateTokens(_ s: String) -> Int {
@@ -206,63 +229,98 @@ final class FollowUpSession: ObservableObject {
     }
 
     /// 估算一份 ctx（含 system + 上下文包 + 历史 + 当前问题）拼出的总 token。
-    nonisolated static func estimateContextTokens(_ ctx: FollowUpContext) -> Int {
-        let msgs = AIClient.followUpMessages(ctx)
-        let joined = Prompt.followUpSystem + "\n" + msgs.map { $0["content"] ?? "" }.joined(separator: "\n")
+    nonisolated static func estimateContextTokens(_ ctx: FollowUpContext, user: AppLanguage) -> Int {
+        let msgs = AIClient.followUpMessages(ctx, user: user)
+        let joined = Prompt.followUpSystem(user: user) + "\n" + msgs.map { $0["content"] ?? "" }.joined(separator: "\n")
         return estimateTokens(joined)
     }
 
     /// 组装 base + 预算内历史（design D5）：
     /// - base（system + 原文 + 完整带序号修正 + 当前问题）**恒保留**；base 超预算 → 返回 nil（fail loud）。
     /// - 否则从**最旧**历史逐轮丢弃，直到放得下；被丢弃历史只影响连续性，不影响被引用修正绑定。
-    nonisolated static func assembleWithinBudget(original: String, corrected: String, summaryZh: String,
+    nonisolated static func assembleWithinBudget(original: String, corrected: String, summary: String,
                                      numberedIssues: [FollowUpContext.NumberedIssue],
                                      allHistory: [FollowUpTurn], question: String,
-                                     budgetTokens: Int) -> FollowUpContext? {
+                                     budgetTokens: Int, user: AppLanguage = .chinese) -> FollowUpContext? {
         func ctx(_ history: [FollowUpTurn]) -> FollowUpContext {
-            FollowUpContext(original: original, corrected: corrected, summaryZh: summaryZh,
+            FollowUpContext(original: original, corrected: corrected, summary: summary,
                             numberedIssues: numberedIssues, history: history, question: question)
         }
         // base（空历史）都放不下 → 无法在预算内保留必要上下文 → fail loud（绝不静默截断）。
-        if estimateContextTokens(ctx([])) > budgetTokens { return nil }
+        if estimateContextTokens(ctx([]), user: user) > budgetTokens { return nil }
         var history = allHistory
-        while !history.isEmpty, estimateContextTokens(ctx(history)) > budgetTokens {
+        while !history.isEmpty, estimateContextTokens(ctx(history), user: user) > budgetTokens {
             history.removeFirst()   // 丢最旧
         }
         return ctx(history)
     }
 
-    /// 应用层输出护栏（design D6 ③）：检测回答里「与 corrected 高度相似的整段替代全文」并替换为约束说明，
-    /// 使其**不被当作可采纳结果**呈现。硬保证（result 不变）已由「回答永不写回 result」达成，此为尽力拦截。
-    nonisolated static let outputGuardNote = "（追问仅答疑，不提供可替代主结果的整段改写；如需重新纠错请重新划词。）"
+    /// 应用层输出护栏（design D6 ③；language-config design D10 增强）：检测回答里「与 corrected
+    /// **或追问内长文本块**高度相似的整段替代文」并替换为约束说明，使其**不被当作可采纳结果**呈现。
+    /// 硬保证（result 不变）已由「回答永不写回 result」达成，此为代码层确定性拦截（近拷贝/最小改动形态）；
+    /// 翻译式整段输出与原文字面不相似、本地相似度无判别力，由 prompt 层约束兜底（design D10 三层诚实保证，风险 R6）。
+    nonisolated static let outputGuardNote = L10n.t(.followUpOutputGuardNote, .chinese)
+
+    /// 兼容旧签名（中文、无问题文本）：既有 corrected 拦截行为逐位保留。
     nonisolated static func applyOutputGuard(answer: String, corrected: String) -> String {
-        let c = corrected.trimmed
-        // corrected 太短（如单词级修正）不判：短串易在解释里被合法引用，避免误伤。
-        guard c.count >= 12 else { return answer }
-        let cWords = wordSet(c)
-        guard cWords.count >= 3 else { return answer }
+        applyOutputGuard(answer: answer, corrected: corrected, question: "", language: .chinese)
+    }
 
-        // 极端自替换保护（评审#3 复审）：若 corrected 恰是 guard note 的子串，替换后仍含 c，
-        // 逐次替换永不收敛 → 直接整体返回 note，杜绝主线程挂死。
-        if outputGuardNote.range(of: c, options: [.caseInsensitive]) != nil { return outputGuardNote }
-
-        var result = answer
-        // 1) verbatim：corrected 原文（含大小写差异）作为整段出现在回答任意位置（含普通段落，如
-        //    「完整版本是：<corrected>，解释…」）→ 替换该出现，杜绝普通段落夹带替代全文绕过（评审#3）。
-        //    用单遍 replacingOccurrences（非重扫替换文本）避免 while 自替换死循环（评审#3 复审）。
-        result = result.replacingOccurrences(of: c, with: outputGuardNote, options: [.caseInsensitive])
-        // 2) fenced 代码块 / 引用块：整块与 corrected 高覆盖且长度相当 → 判为越界全文，整块替换。
-        for block in fencedBlocks(result) where isReplacementFullText(block.content, correctedWords: cWords, correctedLen: c.count) {
-            result = result.replacingOccurrences(of: block.raw, with: outputGuardNote)
-        }
-        // 3) 无围栏、整条回答近似 corrected（直接吐一版全文）→ 整体替换为约束说明。
-        if isReplacementFullText(result.trimmed, correctedWords: cWords, correctedLen: c.count) {
-            return outputGuardNote
+    nonisolated static func applyOutputGuard(answer: String, corrected: String,
+                                             question: String, language: AppLanguage) -> String {
+        let note = L10n.t(.followUpOutputGuardNote, language)
+        var result = guardAgainst(answer, target: corrected, note: note)
+        // D10 护栏增强：话题放宽后用户会贴**新文本**，其整段改写与旧 corrected 无相似性——
+        // 对追问内每个长文本块（粘贴样文本）做同一套拦截，堵住「贴新文本要全文」绕过。
+        for block in pastedBlocks(in: question) {
+            result = guardAgainst(result, target: block, note: note)
         }
         return result
     }
 
-    /// 判据：候选段与 corrected 词覆盖 ≥0.85 且长度比在 [0.8, 1.3] → 视为「整段替代全文」（启发阈值，可调）。
+    /// 针对单个「不得整段替代输出」的目标文本跑三步拦截（corrected 与追问长文本块共用同一实现）。
+    nonisolated private static func guardAgainst(_ answer: String, target: String, note: String) -> String {
+        let c = target.trimmed
+        // 目标太短（如单词级修正/短例句）不判：短串易在解释里被合法引用，避免误伤。
+        guard c.count >= 12 else { return answer }
+        let cWords = wordSet(c)
+        guard cWords.count >= 3 else { return answer }
+
+        // 极端自替换保护（评审#3 复审）：若目标恰是 guard note 的子串，替换后仍含 c，
+        // 逐次替换永不收敛 → 直接整体返回 note，杜绝主线程挂死。
+        if note.range(of: c, options: [.caseInsensitive]) != nil { return note }
+
+        var result = answer
+        // 1) verbatim：目标原文（含大小写差异）作为整段出现在回答任意位置（含普通段落，如
+        //    「完整版本是：<目标>，解释…」）→ 替换该出现，杜绝普通段落夹带替代全文绕过（评审#3）。
+        //    用单遍 replacingOccurrences（非重扫替换文本）避免 while 自替换死循环（评审#3 复审）。
+        result = result.replacingOccurrences(of: c, with: note, options: [.caseInsensitive])
+        // 2) fenced 代码块 / 引用块：整块与目标高覆盖且长度相当 → 判为越界全文，整块替换。
+        for block in fencedBlocks(result) where isReplacementFullText(block.content, correctedWords: cWords, correctedLen: c.count) {
+            result = result.replacingOccurrences(of: block.raw, with: note)
+        }
+        // 3) 无围栏、整条回答近似目标（直接吐一版全文/最小改动改写）→ 整体替换为约束说明。
+        if isReplacementFullText(result.trimmed, correctedWords: cWords, correctedLen: c.count) {
+            return note
+        }
+        return result
+    }
+
+    /// 追问内「长文本块」提取（design D10）：按行切分、trim 后长度 ≥ 阈值的行视为粘贴样文本；
+    /// 无换行的整段长问题同样视为一个块。阈值为启发值：足以排除普通提问句，覆盖粘贴段落。
+    nonisolated static let pastedBlockMinLength = 30
+    nonisolated static func pastedBlocks(in question: String) -> [String] {
+        var blocks = question.components(separatedBy: "\n").map { $0.trimmed }
+            .filter { $0.count >= pastedBlockMinLength }
+        let whole = question.trimmed
+        if whole.count >= pastedBlockMinLength, !blocks.contains(whole) { blocks.append(whole) }
+        return blocks
+    }
+
+    /// 判据：候选段与目标词覆盖 ≥0.85（**双向取 max**）且长度比在 [0.8, 1.3] → 视为「整段替代全文」（启发阈值，可调）。
+    /// 双向覆盖（language-config D10）：目标→候选 抓「近拷贝引用」；候选→目标 抓「最小改动改写」——
+    /// 改写会把目标里的错词换掉（正向覆盖被稀释），但候选的词几乎全来自目标（反向覆盖仍高）。
+    /// 只会更严（多拦不少放），长度比窗口继续兜住「短例句/解释」不误伤。
     nonisolated private static func isReplacementFullText(_ candidate: String, correctedWords: Set<String>, correctedLen: Int) -> Bool {
         let cand = candidate.trimmed
         guard cand.count >= 12 else { return false }
@@ -271,7 +329,8 @@ final class FollowUpSession: ObservableObject {
         let candWords = wordSet(cand)
         guard !candWords.isEmpty else { return false }
         let common = correctedWords.intersection(candWords).count
-        let coverage = Double(common) / Double(correctedWords.count)
+        let coverage = max(Double(common) / Double(correctedWords.count),
+                           Double(common) / Double(candWords.count))
         return coverage >= 0.85
     }
 

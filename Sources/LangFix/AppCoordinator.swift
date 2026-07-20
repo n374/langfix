@@ -25,22 +25,46 @@ final class AppCoordinator {
 
     func checkClipboard() {
         let s = NSPasteboard.general.string(forType: .string)?.trimmed ?? ""
-        guard !s.isEmpty else { info("剪贴板没有文本"); return }
+        guard !s.isEmpty else { info(L10n.t(.clipboardEmpty, lang)); return }
         handleSelection(s)
+    }
+
+    /// 当前用户语言（语言未确认时为 locale 预填值——引导 alert 即用预填语言渲染，design D3）。
+    private var lang: AppLanguage { SettingsStore.shared.userLanguage }
+
+    /// 入口 gate 决策（纯函数，可单测；language-config design D3）：
+    /// 语言 gate **早于** 配置完整性检查——语言决定后续所有 UI 语言，须最先确定。
+    enum EntryGate: Equatable {
+        case languageOnboarding
+        case configNeeded([String])
+        case proceed
+    }
+    static func entryGate(languageConfigured: Bool, config: AppConfig) -> EntryGate {
+        guard languageConfigured else { return .languageOnboarding }
+        guard config.isComplete else { return .configNeeded(config.missingFields(config.userLanguage)) }
+        return .proceed
     }
 
     func handleSelection(_ rawText: String) {
         let cfg = SettingsStore.shared.config()
-        guard cfg.isComplete else {
-            presentConfigNeeded(cfg.missingFields)
+        switch Self.entryGate(languageConfigured: SettingsStore.shared.languageConfigured, config: cfg) {
+        case .languageOnboarding:
+            // 新装未配语言：强制先配语言，不发起 AI 请求（spec「新装首启强制配语言」）。
+            // 不自动续跑：被 gate 拦截的选区此刻已陈旧，配置完成后用户重新划词即可（design D3）。
+            presentLanguageOnboarding()
             return
+        case .configNeeded(let missing):
+            presentConfigNeeded(missing)
+            return
+        case .proceed:
+            break
         }
         // 先规范化内部换行为 LF（CRLF/CR/U+2028/U+2029），再去首尾空白：使发给模型的原文、diff 基线、
         // 换行结构检测三者换行一致可比，杜绝跨来源换行差异导致的丢换行漏检（Adj3 闭环）。
         let input = rawText.normalizedLineEndings.trimmed
         guard !input.isEmpty else { return }
         if input.count > cfg.maxChars {
-            present(error: "文本过长（\(input.count) 字符，上限 \(cfg.maxChars)）")
+            present(error: L10n.tooLong(input.count, cfg.maxChars, lang))
             return
         }
         start(input: input, cfg: cfg)
@@ -103,7 +127,7 @@ final class AppCoordinator {
             } catch let e as ReviewError {
                 if case .cancelled = e { return }
                 if self.generation != myGen { return }
-                state.phase = .error(e.errorDescription ?? "出错了")
+                state.phase = .error(e.localizedText(SettingsStore.shared.userLanguage))
             } catch {
                 if Task.isCancelled || self.generation != myGen { return }
                 state.phase = .error(error.localizedDescription)
@@ -211,16 +235,28 @@ final class AppCoordinator {
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "LangFix",
             .applicationVersion: "\(version) (\(build), \(sha))",
-            NSApplication.AboutPanelOptionKey(rawValue: "Copyright"): "划词写作纠错 · PopClip 触发 · 最小改动 + 中文解释",
+            NSApplication.AboutPanelOptionKey(rawValue: "Copyright"): L10n.t(.aboutSubtitle, lang),
         ])
     }
 
     private func presentConfigNeeded(_ missing: [String]) {
         let alert = NSAlert()
-        alert.messageText = "请先完成配置"
-        alert.informativeText = "缺少：\(missing.joined(separator: "、"))。在设置里填好 OpenAI 兼容端点、API key 与模型后再试。"
-        alert.addButton(withTitle: "打开设置")
-        alert.addButton(withTitle: "取消")
+        alert.messageText = L10n.t(.configNeededTitle, lang)
+        alert.informativeText = L10n.configNeededBody(missing, lang)
+        alert.addButton(withTitle: L10n.t(.openSettings, lang))
+        alert.addButton(withTitle: L10n.t(.cancel, lang))
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn { openSettings() }
+    }
+
+    /// 首启语言引导（language-config design D3）：复用 presentConfigNeeded 同款 NSAlert 模式；
+    /// 文案用 locale 预填的用户语言渲染（此刻配置未确认，用预填值是确定性选择）；「打开设置」→ 设置页确认横幅。
+    private func presentLanguageOnboarding() {
+        let alert = NSAlert()
+        alert.messageText = L10n.t(.languageOnboardingTitle, lang)
+        alert.informativeText = L10n.t(.languageOnboardingBody, lang)
+        alert.addButton(withTitle: L10n.t(.openSettings, lang))
+        alert.addButton(withTitle: L10n.t(.cancel, lang))
         NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn { openSettings() }
     }
@@ -228,7 +264,7 @@ final class AppCoordinator {
     private func info(_ text: String) {
         let alert = NSAlert()
         alert.messageText = text
-        alert.addButton(withTitle: "好")
+        alert.addButton(withTitle: L10n.t(.ok, lang))
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
     }
@@ -784,6 +820,7 @@ final class ReviewWindowController: NSObject, NSWindowDelegate {
 @MainActor
 final class SettingsWindowController: NSObject, NSWindowDelegate {
     private let window: NSWindow
+    private var titleCancellable: AnyCancellable?
 
     /// 设置窗关闭回调（Coordinator 注入，用于重新评估 activation policy）。
     var onClose: (() -> Void)?
@@ -798,11 +835,18 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "LangFix 设置"
+        window.title = L10n.t(.settingsWindowTitle, SettingsStore.shared.userLanguage)
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: SettingsView())
         super.init()
         window.delegate = self
+        // 标题是一次性设置的 NSWindow 属性，不随 SwiftUI 重绘 → 订阅语言变化显式更新。
+        titleCancellable = SettingsStore.shared.$userLanguageRaw
+            .removeDuplicates()
+            .sink { [weak self] raw in
+                guard let lang = AppLanguage(rawValue: raw) else { return }
+                DispatchQueue.main.async { self?.window.title = L10n.t(.settingsWindowTitle, lang) }
+            }
     }
 
     func show() {

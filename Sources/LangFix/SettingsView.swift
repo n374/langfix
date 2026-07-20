@@ -10,9 +10,14 @@ struct SettingsView: View {
     @State private var testOK = false
     @State private var showAdvanced = false
 
+    /// UI 语言 = 用户语言（切换选择器立即换语言，给用户直接反馈；language-config design D4/§8）。
+    private var lang: AppLanguage { settings.userLanguage }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                languageSection
+                Divider()
                 endpointSection
                 Divider()
                 advancedSection
@@ -27,11 +32,59 @@ struct SettingsView: View {
         .onAppear { launchAtLogin = (SMAppService.mainApp.status == .enabled) }
     }
 
+    // MARK: 语言（置顶，language-config design D3/§8）
+
+    private var languageSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(L10n.t(.settingsLanguageSection, lang)).font(.headline)
+
+            // 未确认时的高亮横幅（design D3）：预填好选择器 + 显式「确认」；仅改选择器不算确认。
+            if !settings.languageConfigured {
+                HStack(alignment: .center, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
+                    Text(L10n.t(.settingsLanguageConfirmBanner, lang))
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 8)
+                    Button(L10n.t(.confirm, lang)) { settings.languageConfigured = true }
+                        .keyboardShortcut(.defaultAction)
+                }
+                .padding(8)
+                .background(Color.orange.opacity(0.12))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.orange.opacity(0.5), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+
+            // 两个选择器互斥自动翻转（SettingsStore didSet 保证目标≠用户，不出现相同态）。
+            field(L10n.t(.settingsUserLanguage, lang)) {
+                Picker(L10n.t(.settingsUserLanguage, lang), selection: $settings.userLanguageRaw) {
+                    ForEach(AppLanguage.allCases, id: \.rawValue) { l in
+                        Text(l.nativeName).tag(l.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+            field(L10n.t(.settingsTargetLanguage, lang)) {
+                Picker(L10n.t(.settingsTargetLanguage, lang), selection: $settings.targetLanguageRaw) {
+                    ForEach(AppLanguage.allCases, id: \.rawValue) { l in
+                        Text(l.nativeName).tag(l.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+            Text(L10n.t(.settingsLanguageHint, lang))
+                .font(.caption).foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     // MARK: 端点
 
     private var endpointSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("AI 端点（OpenAI 兼容）").font(.headline)
+            Text(L10n.t(.settingsEndpointSection, lang)).font(.headline)
 
             field("Base URL") {
                 TextField("https://your-endpoint/v1", text: $settings.baseURL)
@@ -45,12 +98,12 @@ struct SettingsView: View {
                     }
             }
             field("Model") {
-                TextField("如 gpt-4o-mini / 某快模型", text: $settings.model)
+                TextField(L10n.t(.settingsModelPlaceholder, lang), text: $settings.model)
                     .textFieldStyle(.roundedBorder)
             }
 
             HStack {
-                Button(testing ? "测试中…" : "测试连接") { runTest() }
+                Button(testing ? L10n.t(.settingsTesting, lang) : L10n.t(.settingsTestConnection, lang)) { runTest() }
                     .disabled(testing)
                 if !testResult.isEmpty {
                     Text(testResult)
@@ -65,19 +118,19 @@ struct SettingsView: View {
     // MARK: 高级
 
     private var advancedSection: some View {
-        DisclosureGroup("高级（最小改动护栏 / 解码）", isExpanded: $showAdvanced) {
+        DisclosureGroup(L10n.t(.settingsAdvancedSection, lang), isExpanded: $showAdvanced) {
             VStack(alignment: .leading, spacing: 10) {
-                Picker("结构化输出", selection: $settings.structuredModeRaw) {
-                    Text("auto（自动降级）").tag(StructuredMode.auto.rawValue)
+                Picker(L10n.t(.settingsStructuredOutput, lang), selection: $settings.structuredModeRaw) {
+                    Text(L10n.t(.settingsStructuredAuto, lang)).tag(StructuredMode.auto.rawValue)
                     Text("json_schema").tag(StructuredMode.jsonSchema.rawValue)
                     Text("json_object").tag(StructuredMode.jsonObject.rawValue)
-                    Text("纯文本").tag(StructuredMode.text.rawValue)
+                    Text(L10n.t(.settingsStructuredText, lang)).tag(StructuredMode.text.rawValue)
                 }
                 slider("temperature", value: $settings.temperature, range: 0...1, fmt: "%.2f")
-                slider("改动阈值 diffThreshold", value: $settings.diffThreshold, range: 0...1, fmt: "%.2f")
-                stepperInt("护栏最小词数 minWordsForGuard", value: $settings.minWordsForGuard, range: 1...50)
-                stepperInt("护栏最小编辑数 minAbsEdits", value: $settings.minAbsEdits, range: 0...20)
-                field("输入上限 maxChars") {
+                slider(L10n.t(.settingsDiffThreshold, lang), value: $settings.diffThreshold, range: 0...1, fmt: "%.2f")
+                stepperInt(L10n.t(.settingsMinWords, lang), value: $settings.minWordsForGuard, range: 1...50)
+                stepperInt(L10n.t(.settingsMinAbsEdits, lang), value: $settings.minAbsEdits, range: 0...20)
+                field(L10n.t(.settingsMaxChars, lang)) {
                     TextField("", value: $settings.maxChars, format: .number)
                         .textFieldStyle(.roundedBorder).frame(width: 100)
                 }
@@ -91,8 +144,8 @@ struct SettingsView: View {
     private var generalSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             // 弹窗主题：切换即时生效（@Published → 弹窗 SwiftUI 自动重绘），持久化到 UserDefaults。
-            field("弹窗主题") {
-                Picker("弹窗主题", selection: $settings.reviewThemeRaw) {
+            field(L10n.t(.settingsTheme, lang)) {
+                Picker(L10n.t(.settingsTheme, lang), selection: $settings.reviewThemeRaw) {
                     ForEach(ReviewThemeID.allCases) { id in
                         Text(ReviewThemeCatalog.theme(id).displayName).tag(id.rawValue)
                     }
@@ -101,29 +154,30 @@ struct SettingsView: View {
                 .labelsHidden()
             }
             // 字号档位：作用域仅结果浮窗文本区（设置页自身不缩放）；切换即时生效，同主题机制。
-            field("字号（结果浮窗）") {
-                Picker("字号", selection: $settings.reviewFontTierRaw) {
+            field(L10n.t(.settingsFontSize, lang)) {
+                Picker(L10n.t(.settingsFontSize, lang), selection: $settings.reviewFontTierRaw) {
                     ForEach(ReviewFontTier.allCases) { t in
-                        Text(t.displayName).tag(t.rawValue)
+                        Text(t.displayName(lang)).tag(t.rawValue)
                     }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
             }
             windowBehaviorSection
-            Toggle("流式渲染（逐字预览，端点不支持时自动回退）", isOn: $settings.streamingEnabled)
-            Toggle("登录时启动（常驻，消除冷启动延迟）", isOn: $launchAtLogin)
+            Toggle(L10n.t(.settingsStreamingToggle, lang), isOn: $settings.streamingEnabled)
+            Toggle(L10n.t(.settingsLaunchAtLogin, lang), isOn: $launchAtLogin)
                 .onChange(of: launchAtLogin) { on in setLaunchAtLogin(on) }
         }
     }
 
     private var windowBehaviorSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("窗口行为").font(.caption).foregroundColor(.secondary)
+            Text(L10n.t(.settingsWindowBehavior, lang)).font(.caption).foregroundColor(.secondary)
             VStack(spacing: 6) {
                 ForEach(WindowBehaviorMode.allCases) { mode in
                     WindowBehaviorModeCard(
                         mode: mode,
+                        language: lang,
                         selected: settings.windowBehaviorMode == mode,
                         theme: settings.reviewTheme
                     ) {
@@ -136,8 +190,9 @@ struct SettingsView: View {
 
     private var privacyNote: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Label("隐私", systemImage: "lock.shield").font(.caption.bold()).foregroundColor(.secondary)
-            Text("API key 仅存于 macOS Keychain；不记录原文与修正文。注意：选中文本与你的追问内容都会通过 HTTPS 发送到你配置的端点处理（非本地处理），敏感内容请自行选择可信端点。追问会话仅存于当前结果窗口的内存，关窗即清、不落盘。")
+            Label(L10n.t(.settingsPrivacyTitle, lang), systemImage: "lock.shield")
+                .font(.caption.bold()).foregroundColor(.secondary)
+            Text(L10n.t(.settingsPrivacyBody, lang))
                 .font(.caption).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -162,7 +217,7 @@ struct SettingsView: View {
             if on { try SMAppService.mainApp.register() }
             else { try SMAppService.mainApp.unregister() }
         } catch {
-            testResult = "登录项设置失败：\(error.localizedDescription)"
+            testResult = L10n.launchAtLoginFailed(error.localizedDescription, lang)
             testOK = false
             launchAtLogin = (SMAppService.mainApp.status == .enabled)
         }
@@ -198,6 +253,7 @@ struct SettingsView: View {
 
 private struct WindowBehaviorModeCard: View {
     let mode: WindowBehaviorMode
+    let language: AppLanguage
     let selected: Bool
     let theme: ReviewTheme
     let action: () -> Void
@@ -209,10 +265,10 @@ private struct WindowBehaviorModeCard: View {
                     .frame(width: 22)
                     .foregroundColor(selected ? theme.accent : .secondary)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(mode.title)
+                    Text(mode.title(language))
                         .font(.subheadline.weight(.semibold))
                         .foregroundColor(.primary)
-                    Text(mode.subtitle)
+                    Text(mode.subtitle(language))
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

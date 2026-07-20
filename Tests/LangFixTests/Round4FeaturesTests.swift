@@ -27,20 +27,20 @@ final class Round4FeaturesTests: XCTestCase {
         }
     }
 
-    // MARK: 需求2 —— 流式解析器提取 translation_zh（闭合后整体填充）
+    // MARK: 需求2 —— 流式解析器提取 translation（新字段名，language-config D6；闭合后整体填充）
 
-    func testPartialParserExtractsTranslationZh() {
+    func testPartialParserExtractsTranslation() {
         var parser = PartialReviewParser()
-        _ = parser.feed("{\"corrected\":\"Thanks\",\"translation_zh\":\"谢谢\"")
+        _ = parser.feed("{\"corrected\":\"Thanks\",\"translation\":\"谢谢\"")
         let snap = parser.snapshot(stage: .receiving)
         XCTAssertEqual(snap.corrected, "Thanks")
-        XCTAssertEqual(snap.translationZh, "谢谢", "translation_zh 闭合后应被提取")
+        XCTAssertEqual(snap.translation, "谢谢", "translation 闭合后应被提取")
     }
 
     // MARK: 需求4/5 —— 顶层主菜单 + Cmd+, 快捷键
 
     func testAppMenuHasSettingsWithCommandComma() {
-        let menu = AppMenu.build(target: AppDelegate())
+        let menu = AppMenu.build(target: AppDelegate(), language: .chinese)
         guard let appMenu = menu.items.first?.submenu else { return XCTFail("缺 App 子菜单") }
         guard let settings = appMenu.items.first(where: { $0.title == "设置…" }) else {
             return XCTFail("缺「设置…」菜单项")
@@ -50,7 +50,7 @@ final class Round4FeaturesTests: XCTestCase {
     }
 
     func testAppMenuHasEditAndWindowSubmenus() {
-        let menu = AppMenu.build(target: AppDelegate())
+        let menu = AppMenu.build(target: AppDelegate(), language: .chinese)
         XCTAssertGreaterThanOrEqual(menu.items.count, 3, "至少 App/Edit/Window 三个子菜单")
         let editMenu = menu.items[1].submenu
         XCTAssertNotNil(editMenu?.items.first(where: { $0.title == "复制" }), "Edit 菜单含复制")
@@ -62,8 +62,8 @@ final class Round4FeaturesTests: XCTestCase {
     func testAllPhaseViewsLayoutWithoutCrash() {
         _ = NSApplication.shared
         let state = ReviewState()
-        let preview = StreamingPreview(corrected: "This is a fix.", translationZh: "这是一个修正。",
-                                       summaryZh: "小改", issues: [Self.sampleIssue()])
+        let preview = StreamingPreview(corrected: "This is a fix.", translation: "这是一个修正。",
+                                       summary: "小改", issues: [Self.sampleIssue()])
         let phases: [ReviewState.Phase] = [
             .loading,
             .streaming(preview),
@@ -98,11 +98,11 @@ final class Round4FeaturesTests: XCTestCase {
 
     private static func sampleResult(translation: String = "", issues: [Issue] = []) -> ReviewResult {
         ReviewResult(hasIssues: !issues.isEmpty, original: "orig text", corrected: "corrected text",
-                     translationZh: translation, summaryZh: "总评", issues: issues,
-                     alternative: "a more idiomatic rewrite", alternativeReasonZh: "这样更符合母语表达习惯")
+                     translation: translation, summary: "总评", issues: issues,
+                     alternative: "a more idiomatic rewrite", alternativeReason: "这样更符合母语表达习惯")
     }
 
     private static func sampleIssue() -> Issue {
-        Issue(category: .grammar, severity: .error, before: "a", after: "b", reasonZh: "原因")
+        Issue(category: .grammar, severity: .error, before: "a", after: "b", reason: "原因")
     }
 }

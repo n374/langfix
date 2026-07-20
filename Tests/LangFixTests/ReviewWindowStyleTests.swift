@@ -367,7 +367,7 @@ final class ReviewWindowStyleTests: XCTestCase {
         _ = NSApplication.shared
         let state = ReviewState()
         // 短主结果：只有追问增长把内容推过 maxH，隔离验证「追问驱动的封顶/溢出」。
-        let result = ReviewResult(hasIssues: false, original: "short", corrected: "short", summaryZh: "", issues: [])
+        let result = ReviewResult(hasIssues: false, original: "short", corrected: "short", summary: "", issues: [])
         state.phase = .result(result)
         let stub = StubFollowUp()
         stub.answer = Self.streamingText(lines: 24)   // 每轮长回答，少数几轮即累积超过 maxH（省重测量开销）

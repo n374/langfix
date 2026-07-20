@@ -20,7 +20,7 @@ final class CollapsedStatusTests: XCTestCase {
     }
 
     func testTitlesAreDistinctAndNonEmpty() {
-        let titles = [CollapsedStatus.working, .done, .failed].map(\.title)
+        let titles = [CollapsedStatus.working, .done, .failed].map { $0.title(.chinese) }
         XCTAssertEqual(Set(titles).count, 3, "三态文案互不相同")
         XCTAssertTrue(titles.allSatisfy { !$0.isEmpty })
     }
@@ -47,6 +47,6 @@ final class CollapsedStatusTests: XCTestCase {
     }
 
     private func sampleResult() -> ReviewResult {
-        ReviewResult(hasIssues: false, original: "a", corrected: "a", summaryZh: "", issues: [])
+        ReviewResult(hasIssues: false, original: "a", corrected: "a", summary: "", issues: [])
     }
 }

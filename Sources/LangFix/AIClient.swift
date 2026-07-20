@@ -27,7 +27,7 @@ extension ReviewProviding {
     func reviewStreaming(text: String, config: AppConfig, mode: AIClient.Mode,
                          onPreview: @MainActor @Sendable (StreamingPreview) async -> Void) async throws -> ReviewResult {
         let r = try await review(text: text, config: config, mode: mode)
-        await onPreview(StreamingPreview(corrected: r.corrected, summaryZh: r.summaryZh,
+        await onPreview(StreamingPreview(corrected: r.corrected, summary: r.summary,
                                          issues: r.issues, alternative: r.alternative, stage: .finalizing))
         return r
     }
@@ -70,6 +70,15 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
 
     // MARK: - 对外入口
 
+    /// 解析失败的类别记录（design D5 评审 R2-2）：`.contract`（合法 JSON 但违反字段契约）优先级高于
+    /// `.decode`（非合法 JSON / 纯文本），一旦出现不被后续 `.decode` 覆盖——收口处据此分叉：
+    /// `.contract` → fail loud 进错误态（禁走 fallback）；`.decode` → 维持既有「展示原文」fallback。
+    private static func note(_ e: ReviewError, into lastError: inout Error?) {
+        if case .contract = e { lastError = e; return }
+        if let cur = lastError as? ReviewError, case .contract = cur { return }
+        lastError = e
+    }
+
     /// 返回已用本地输入校正过 original / 跑过 schema 校验的结果。失败抛 ReviewError。
     func review(text localInput: String, config cfg: AppConfig, mode: Mode) async throws -> ReviewResult {
         let cachedMode = await Self.cap.get(Self.cacheKey(cfg))
@@ -83,26 +92,39 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
                 // 截断：提高 max_tokens 重发一次。
                 if finish == "length" {
                     let (content2, finish2) = try await chat(input: localInput, cfg: cfg, tier: tier, mode: mode, bumpTokens: true)
-                    if finish2 != "length", let r = try? parseAndValidate(content2, localInput: localInput) {
-                        await Self.cap.set(Self.cacheKey(cfg), tier)
-                        return r
+                    if finish2 != "length" {
+                        switch parseAttempt(content2, localInput: localInput) {
+                        case .success(let r):
+                            await Self.cap.set(Self.cacheKey(cfg), tier)
+                            return r
+                        case .failure(let e):
+                            // bump 后契约违规不得吞成「结果被截断」fallback（评审 R2-1）：归入 lastError 继续 tier 流程。
+                            if case .contract = e { Self.note(e, into: &lastError); continue }
+                            // .decode（bump 后仍非合法 JSON）→ 维持截断 fallback（现状语义）。
+                        }
                     }
-                    // 仍截断 → 纯文本兜底。
-                    return ReviewResult.fallback(localInput: localInput, note: "结果被截断，已尽力展示原文")
+                    // 仍截断 / bump 后非合法 JSON → 纯文本兜底。
+                    return ReviewResult.fallback(localInput: localInput, note: L10n.fallbackTruncated(cfg.userLanguage))
                 }
 
-                if let r = try? parseAndValidate(content, localInput: localInput) {
+                switch parseAttempt(content, localInput: localInput) {
+                case .success(let r):
                     await Self.cap.set(Self.cacheKey(cfg), tier)
                     return r
+                case .failure(let e):
+                    Self.note(e, into: &lastError)
                 }
                 // 解析失败 → 一次修复重试（仅在当前 tier）。
-                if let repaired = try? await repair(input: localInput, cfg: cfg, tier: tier, badContent: content),
-                   let r = try? parseAndValidate(repaired, localInput: localInput) {
-                    await Self.cap.set(Self.cacheKey(cfg), tier)
-                    return r
+                if let repaired = try? await repair(input: localInput, cfg: cfg, tier: tier, badContent: content) {
+                    switch parseAttempt(repaired, localInput: localInput) {
+                    case .success(let r):
+                        await Self.cap.set(Self.cacheKey(cfg), tier)
+                        return r
+                    case .failure(let e):
+                        Self.note(e, into: &lastError)
+                    }
                 }
-                // 当前 tier 解析不出来 → 降级到下一 tier。
-                lastError = ReviewError.decode("tier \(tier.rawValue) 无法解析为合法 ReviewResult")
+                // 当前 tier 解析不出来 → 降级到下一 tier（lastError 已按类别记录）。
             } catch let e as ReviewError {
                 switch e {
                 case .server(let code) where code == 400:
@@ -115,11 +137,15 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
             }
         }
 
-        // 所有 tier 都没成功：若是纯解析问题，给纯文本兜底；否则抛错。
-        if let re = lastError as? ReviewError, case .decode = re {
-            return ReviewResult.fallback(localInput: localInput, note: "解析失败，已尽力展示原文")
+        // 所有 tier 都没成功：契约违规 fail loud 进错误态；纯解析问题给纯文本兜底；否则抛错（design D5）。
+        if let re = lastError as? ReviewError {
+            switch re {
+            case .contract: throw re
+            case .decode: return ReviewResult.fallback(localInput: localInput, note: L10n.fallbackParseFailed(cfg.userLanguage))
+            default: break
+            }
         }
-        throw lastError ?? ReviewError.decode("未知错误")
+        throw lastError ?? ReviewError.decode("unknown error")
     }
 
     // MARK: - 流式入口（override 协议默认实现，提供真流式）
@@ -162,26 +188,38 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
                 if finish == "length" {
                     await onPreview(parser.snapshot(stage: .finalizing))
                     let (content2, finish2) = try await chat(input: localInput, cfg: cfg, tier: tier, mode: mode, bumpTokens: true)
-                    if finish2 != "length", let r = try? parseAndValidate(content2, localInput: localInput) {
-                        await Self.cap.set(key, tier)
-                        await Self.streamCap.set(key, .supported)
-                        return r
+                    if finish2 != "length" {
+                        switch parseAttempt(content2, localInput: localInput) {
+                        case .success(let r):
+                            await Self.cap.set(key, tier)
+                            await Self.streamCap.set(key, .supported)
+                            return r
+                        case .failure(let e):
+                            // bump 后契约违规不得吞成「结果被截断」fallback（评审 R2-1，与非流式入口同构）。
+                            if case .contract = e { Self.note(e, into: &lastError); continue }
+                        }
                     }
-                    return ReviewResult.fallback(localInput: localInput, note: "结果被截断，已尽力展示原文")
+                    return ReviewResult.fallback(localInput: localInput, note: L10n.fallbackTruncated(cfg.userLanguage))
                 }
 
-                if let r = try? parseAndValidate(content, localInput: localInput) {
+                switch parseAttempt(content, localInput: localInput) {
+                case .success(let r):
                     await Self.cap.set(key, tier)
                     await Self.streamCap.set(key, .supported)
                     return r
+                case .failure(let e):
+                    Self.note(e, into: &lastError)
                 }
                 // 解析失败 → 非流式修复重试（仅当前 tier）。
-                if let repaired = try? await repair(input: localInput, cfg: cfg, tier: tier, badContent: content),
-                   let r = try? parseAndValidate(repaired, localInput: localInput) {
-                    await Self.cap.set(key, tier)
-                    return r
+                if let repaired = try? await repair(input: localInput, cfg: cfg, tier: tier, badContent: content) {
+                    switch parseAttempt(repaired, localInput: localInput) {
+                    case .success(let r):
+                        await Self.cap.set(key, tier)
+                        return r
+                    case .failure(let e):
+                        Self.note(e, into: &lastError)
+                    }
                 }
-                lastError = ReviewError.decode("tier \(tier.rawValue) 流式内容无法解析为合法 ReviewResult")
             } catch let e as ReviewError {
                 switch e {
                 case .server(let code) where code == 400:
@@ -197,9 +235,12 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
 
         if let re = lastError as? ReviewError {
             switch re {
+            case .contract:
+                // 契约违规（合法 JSON 缺关键解释字段）→ fail loud 进错误态，禁走 fallback（design D5）。
+                throw re
             case .decode:
                 // 流式内容解析失败（流本身没问题）→ 纯文本兜底。
-                return ReviewResult.fallback(localInput: localInput, note: "解析失败，已尽力展示原文")
+                return ReviewResult.fallback(localInput: localInput, note: L10n.fallbackParseFailed(cfg.userLanguage))
             case .server:
                 // 所有可用 tier 的流式请求都吃 400（response_format/结构化与 stream 组合问题、或单 tier 无可降级）。
                 // ≠ 端点不支持流式 → 回退非流式重试（不缓存 unsupported）。非流式 review 会用同样的 tier 体系
@@ -209,7 +250,7 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
                 break
             }
         }
-        throw lastError ?? ReviewError.decode("未知错误")
+        throw lastError ?? ReviewError.decode("unknown error")
     }
 
     /// 单次流式请求：发 `stream:true`，逐行解析 SSE，累积 delta.content，喂 parser 触发 onPreview。
@@ -223,7 +264,7 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
             "temperature": cfg.temperature,
             "stream": true,
             "messages": [
-                ["role": "system", "content": Prompt.system(mode: mode)],
+                ["role": "system", "content": Prompt.system(mode: mode, target: cfg.targetLanguage, user: cfg.userLanguage)],
                 ["role": "user", "content": Prompt.user(input)],
             ],
         ]
@@ -249,7 +290,7 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
             throw ReviewError.network(error.localizedDescription)
         }
 
-        guard let http = resp as? HTTPURLResponse else { throw ReviewError.network("无 HTTP 响应") }
+        guard let http = resp as? HTTPURLResponse else { throw ReviewError.network(L10n.t(.noHTTPResponse, cfg.userLanguage)) }
         switch http.statusCode {
         case 200...299: break
         case 401, 403: throw ReviewError.auth
@@ -349,7 +390,7 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
         let body: [String: Any] = [
             "model": cfg.model,
             "temperature": cfg.temperature,
-            "messages": Self.followUpMessages(ctx),
+            "messages": Self.followUpMessages(ctx, user: cfg.userLanguage),
         ]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
@@ -363,11 +404,11 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
         } catch {
             throw ReviewError.network(error.localizedDescription)
         }
-        guard let http = resp as? HTTPURLResponse else { throw ReviewError.network("无 HTTP 响应") }
+        guard let http = resp as? HTTPURLResponse else { throw ReviewError.network(L10n.t(.noHTTPResponse, cfg.userLanguage)) }
         try Self.mapFollowUpStatus(http.statusCode, body: String(decoding: data, as: UTF8.self))
         guard let parsed = try? JSONDecoder().decode(ChatResponse.self, from: data),
               let choice = parsed.choices.first else {
-            throw ReviewError.decode("无法解析追问响应外层")
+            throw ReviewError.decode("cannot parse follow-up response envelope")
         }
         // 正确性红线（评审#1）：截断 / 空回答不当成功。
         if choice.finishReason == "length" { throw ReviewError.truncated }
@@ -385,7 +426,7 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
             "model": cfg.model,
             "temperature": cfg.temperature,
             "stream": true,
-            "messages": Self.followUpMessages(ctx),
+            "messages": Self.followUpMessages(ctx, user: cfg.userLanguage),
         ]
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
@@ -401,7 +442,7 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
             throw ReviewError.network(error.localizedDescription)
         }
 
-        guard let http = resp as? HTTPURLResponse else { throw ReviewError.network("无 HTTP 响应") }
+        guard let http = resp as? HTTPURLResponse else { throw ReviewError.network(L10n.t(.noHTTPResponse, cfg.userLanguage)) }
         switch http.statusCode {
         case 200...299: break
         case 401, 403: throw ReviewError.auth
@@ -468,16 +509,16 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
 
     /// 追问消息序列：system + 上下文包(data) + 历史轮(user/assistant) + 当前问题(user, data)。
     /// history 已由调用方按预算裁剪（design D5）；上下文包与当前问题恒在。
-    static func followUpMessages(_ ctx: FollowUpContext) -> [[String: String]] {
+    static func followUpMessages(_ ctx: FollowUpContext, user: AppLanguage) -> [[String: String]] {
         var msgs: [[String: String]] = [
-            ["role": "system", "content": Prompt.followUpSystem],
-            ["role": "user", "content": Prompt.followUpContext(ctx)],
+            ["role": "system", "content": Prompt.followUpSystem(user: user)],
+            ["role": "user", "content": Prompt.followUpContext(ctx, user: user)],
         ]
         for turn in ctx.history {
-            msgs.append(["role": "user", "content": Prompt.followUpQuestion(turn.question)])
+            msgs.append(["role": "user", "content": Prompt.followUpQuestion(turn.question, user: user)])
             msgs.append(["role": "assistant", "content": turn.answer])
         }
-        msgs.append(["role": "user", "content": Prompt.followUpQuestion(ctx.question)])
+        msgs.append(["role": "user", "content": Prompt.followUpQuestion(ctx.question, user: user)])
         return msgs
     }
 
@@ -505,9 +546,10 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
 
     // MARK: - 测试连接
 
-    /// 用当前 baseURL+apiKey+model 发最小请求，验证端点与 model 可用性。返回 (ok, 中文消息)。
+    /// 用当前 baseURL+apiKey+model 发最小请求，验证端点与 model 可用性。返回 (ok, 用户语言消息)。
     func probe(config cfg: AppConfig) async -> (ok: Bool, message: String) {
-        guard cfg.isComplete else { return (false, "缺少：\(cfg.missingFields.joined(separator: "、"))") }
+        let lang = cfg.userLanguage
+        guard cfg.isComplete else { return (false, L10n.probeMissing(cfg.missingFields(lang), lang)) }
         do {
             var req = try makeRequest(cfg: cfg)
             let body: [String: Any] = [
@@ -517,19 +559,19 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
             ]
             req.httpBody = try JSONSerialization.data(withJSONObject: body)
             let (data, resp) = try await session.data(for: req)
-            guard let http = resp as? HTTPURLResponse else { return (false, "无 HTTP 响应") }
+            guard let http = resp as? HTTPURLResponse else { return (false, L10n.t(.noHTTPResponse, lang)) }
             switch http.statusCode {
-            case 200...299: return (true, "连接成功，模型 \(cfg.model) 可用")
-            case 401, 403: return (false, "鉴权失败：请检查 API key")
-            case 404: return (false, "404：请检查 baseURL 或 model 是否存在")
+            case 200...299: return (true, L10n.probeOK(cfg.model, lang))
+            case 401, 403: return (false, L10n.t(.probeAuth, lang))
+            case 404: return (false, L10n.t(.probe404, lang))
             case 400:
                 let msg = (String(data: data, encoding: .utf8) ?? "").lowercased()
-                return (false, msg.contains("model") ? "模型不可用：\(cfg.model)" : "请求被拒（400）")
-            case 429: return (false, "限流（429），请稍后再试")
-            default: return (false, "HTTP \(http.statusCode)")
+                return (false, msg.contains("model") ? L10n.probeModelUnavailable(cfg.model, lang) : L10n.t(.probe400, lang))
+            case 429: return (false, L10n.t(.probe429, lang))
+            default: return (false, L10n.probeHTTP(http.statusCode, lang))
             }
         } catch {
-            return (false, "网络错误：\(error.localizedDescription)")
+            return (false, L10n.probeNetworkError(error.localizedDescription, lang))
         }
     }
 
@@ -555,7 +597,7 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
             "model": cfg.model,
             "temperature": cfg.temperature,
             "messages": [
-                ["role": "system", "content": Prompt.system(mode: mode)],
+                ["role": "system", "content": Prompt.system(mode: mode, target: cfg.targetLanguage, user: cfg.userLanguage)],
                 ["role": "user", "content": Prompt.user(input)],
             ],
         ]
@@ -582,7 +624,7 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
         }
 
         guard let http = resp as? HTTPURLResponse else {
-            throw ReviewError.network("无 HTTP 响应")
+            throw ReviewError.network(L10n.t(.noHTTPResponse, cfg.userLanguage))
         }
         switch http.statusCode {
         case 200...299: break
@@ -594,7 +636,7 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
 
         guard let parsed = try? JSONDecoder().decode(ChatResponse.self, from: data),
               let choice = parsed.choices.first else {
-            throw ReviewError.decode("无法解析 chat 响应外层")
+            throw ReviewError.decode("cannot parse chat response envelope")
         }
         // refusal：当作空内容，交由上层走修复/降级。
         let content = choice.message.content ?? choice.message.refusal ?? ""
@@ -607,10 +649,10 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
             "model": cfg.model,
             "temperature": cfg.temperature,
             "messages": [
-                ["role": "system", "content": Prompt.system(mode: .firstPass)],
+                ["role": "system", "content": Prompt.system(mode: .firstPass, target: cfg.targetLanguage, user: cfg.userLanguage)],
                 ["role": "user", "content": Prompt.user(input)],
                 ["role": "assistant", "content": badContent],
-                ["role": "user", "content": Prompt.repairHint],
+                ["role": "user", "content": Prompt.repairHint(user: cfg.userLanguage)],
             ],
         ]
         if tier == .jsonObject { body["response_format"] = ["type": "json_object"] }
@@ -619,7 +661,7 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
         let (data, _) = try await session.data(for: req)
         guard let parsed = try? JSONDecoder().decode(ChatResponse.self, from: data),
               let content = parsed.choices.first?.message.content else {
-            throw ReviewError.decode("修复重试无内容")
+            throw ReviewError.decode("repair retry returned no content")
         }
         return content
     }
@@ -627,7 +669,7 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
     private func makeRequest(cfg: AppConfig) throws -> URLRequest {
         let base = cfg.baseURL.trimmed.hasSuffix("/") ? String(cfg.baseURL.trimmed.dropLast()) : cfg.baseURL.trimmed
         guard let url = URL(string: base + "/chat/completions") else {
-            throw ReviewError.network("无效的 baseURL")
+            throw ReviewError.network(L10n.t(.invalidBaseURL, cfg.userLanguage))
         }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
@@ -639,19 +681,30 @@ final class AIClient: ReviewProviding, FollowUpProviding, Sendable {
 
     // MARK: - 解析与校验（含基准一致性）
 
-    private func parseAndValidate(_ content: String, localInput: String) throws -> ReviewResult {
+    /// 单次解析尝试（design D5 评审 R2-2 规范形态）：返回 Result 保留错误**类别**，调用点不得用 try? 丢弃。
+    /// - `.decode`：内容非合法 JSON（含纯文本端点回复）→ 收口处走既有「展示原文」fallback；
+    /// - `.contract`：合法 JSON 但违反字段契约（关键解释字段缺失等，Issue/ReviewResult 解码 fail loud）
+    ///   → 收口处 fail loud 进错误态，**禁止**走 fallback。
+    private func parseAttempt(_ content: String, localInput: String) -> Result<ReviewResult, ReviewError> {
         let json = Self.extractJSON(content)
         guard let data = json.data(using: .utf8),
-              var result = try? JSONDecoder().decode(ReviewResult.self, from: data) else {
-            throw ReviewError.decode("内容非合法 ReviewResult JSON")
+              (try? JSONSerialization.jsonObject(with: data)) != nil else {
+            return .failure(.decode("content is not valid JSON"))
         }
-        // 基准一致性：不信任模型回显的 original，一律以本地输入为准。
-        result.original = localInput
-        // has_issues=false 时 corrected 必须等于本地输入。
-        if !result.hasIssues { result.corrected = localInput }
-        // corrected 为空兜底。
-        if result.corrected.trimmed.isEmpty { result.corrected = localInput }
-        return result
+        do {
+            var result = try JSONDecoder().decode(ReviewResult.self, from: data)
+            // 基准一致性：不信任模型回显的 original，一律以本地输入为准。
+            result.original = localInput
+            // has_issues=false 时 corrected 必须等于本地输入。
+            if !result.hasIssues { result.corrected = localInput }
+            // corrected 为空兜底。
+            if result.corrected.trimmed.isEmpty { result.corrected = localInput }
+            return .success(result)
+        } catch {
+            // JSON 语法已合法，解码失败即字段契约违规（Issue.reason / summary 关键字段缺失等）。
+            let detail = (error as? DecodingError).map(String.init(describing:)) ?? error.localizedDescription
+            return .failure(.contract(detail))
+        }
     }
 
     /// 从可能包裹 ```json fenced``` 或前后有杂字的文本里提取 JSON 主体。

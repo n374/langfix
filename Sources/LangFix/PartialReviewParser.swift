@@ -35,7 +35,7 @@ struct PartialReviewParser {
     // MARK: - 指纹（去重）
 
     private func fingerprint(_ p: StreamingPreview) -> String {
-        "\(p.corrected.count)|\(p.translationZh ?? "")|\(p.summaryZh ?? "")|\(p.issues.count)|\(p.alternative ?? "")"
+        "\(p.corrected.count)|\(p.translation ?? "")|\(p.summary ?? "")|\(p.issues.count)|\(p.alternative ?? "")"
     }
 
     // MARK: - 前向宽容扫描
@@ -51,12 +51,12 @@ struct PartialReviewParser {
         if let f = fields["corrected"], case let .string(raw, _) = f {
             preview.corrected = Self.decodeStablePrefix(raw)
         }
-        // translation_zh / summary_zh / alternative：仅在字符串闭合后整体填充。
-        if let f = fields["translation_zh"], case let .string(raw, closed) = f, closed {
-            preview.translationZh = Self.decodeStablePrefix(raw)
+        // translation / summary / alternative：仅在字符串闭合后整体填充（新字段名，design D6；旧 _zh 名不扫——预览仅 UI 快照，定稿由兼容解码兜底）。
+        if let f = fields["translation"], case let .string(raw, closed) = f, closed {
+            preview.translation = Self.decodeStablePrefix(raw)
         }
-        if let f = fields["summary_zh"], case let .string(raw, closed) = f, closed {
-            preview.summaryZh = Self.decodeStablePrefix(raw)
+        if let f = fields["summary"], case let .string(raw, closed) = f, closed {
+            preview.summary = Self.decodeStablePrefix(raw)
         }
         if let f = fields["alternative"], case let .string(raw, closed) = f, closed {
             preview.alternative = Self.decodeStablePrefix(raw)

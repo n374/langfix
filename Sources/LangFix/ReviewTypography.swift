@@ -19,12 +19,13 @@ enum ReviewFontTier: String, CaseIterable, Identifiable, Sendable {
         self = ReviewFontTier(rawValue: raw ?? "") ?? .defaultTier
     }
 
-    var displayName: String {
+    /// 档位展示名随用户语言（language-config design D4）。
+    func displayName(_ lang: AppLanguage) -> String {
         switch self {
-        case .small: return "小"
-        case .standard: return "标准"
-        case .large: return "大"
-        case .xLarge: return "特大"
+        case .small: return L10n.t(.fontTierSmall, lang)
+        case .standard: return L10n.t(.fontTierStandard, lang)
+        case .large: return L10n.t(.fontTierLarge, lang)
+        case .xLarge: return L10n.t(.fontTierXLarge, lang)
         }
     }
 

@@ -33,7 +33,7 @@ final class StubProvider: ReviewProviding, @unchecked Sendable {
         calls.append(isStrict ? "strict" : "firstPass")
         let corrected = isStrict ? (strictCorrected ?? firstCorrected) : firstCorrected
         return ReviewResult(hasIssues: corrected != text, original: text,
-                            corrected: corrected, summaryZh: "", issues: [])
+                            corrected: corrected, summary: "", issues: [])
     }
 }
 
@@ -54,7 +54,7 @@ final class ThrowingStrictStub: ReviewProviding, @unchecked Sendable {
             throw strictError
         }
         calls.append("firstPass")
-        return ReviewResult(hasIssues: true, original: text, corrected: firstCorrected, summaryZh: "", issues: [])
+        return ReviewResult(hasIssues: true, original: text, corrected: firstCorrected, summary: "", issues: [])
     }
     // reviewStreaming 用协议默认实现（非流式 + 一次 finalizing preview）。
 }

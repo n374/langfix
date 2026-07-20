@@ -15,19 +15,20 @@ enum WindowBehaviorMode: String, CaseIterable, Identifiable, Sendable {
         self = WindowBehaviorMode(rawValue: raw ?? "") ?? .defaultMode
     }
 
-    var title: String {
+    /// 模式标题随用户语言（language-config design D4）。
+    func title(_ lang: AppLanguage) -> String {
         switch self {
-        case .focusCollapse: return "失焦折叠"
-        case .alwaysOnTop: return "始终置顶"
-        case .normal: return "默认窗口"
+        case .focusCollapse: return L10n.t(.windowModeFocusCollapseTitle, lang)
+        case .alwaysOnTop: return L10n.t(.windowModeAlwaysOnTopTitle, lang)
+        case .normal: return L10n.t(.windowModeNormalTitle, lang)
         }
     }
 
-    var subtitle: String {
+    func subtitle(_ lang: AppLanguage) -> String {
         switch self {
-        case .focusCollapse: return "切到别处自动变胶囊；Esc / 隐藏也会折叠"
-        case .alwaysOnTop: return "窗口和胶囊都保持置顶；Esc / 隐藏可暂收"
-        case .normal: return "像普通窗口一样可被遮挡；Esc / 隐藏可收起"
+        case .focusCollapse: return L10n.t(.windowModeFocusCollapseSubtitle, lang)
+        case .alwaysOnTop: return L10n.t(.windowModeAlwaysOnTopSubtitle, lang)
+        case .normal: return L10n.t(.windowModeNormalSubtitle, lang)
         }
     }
 
@@ -152,12 +153,12 @@ enum CollapsedStatus: Equatable, Sendable {
         }
     }
 
-    /// 胶囊文案。
-    var title: String {
+    /// 胶囊文案随用户语言（language-config design D4）。
+    func title(_ lang: AppLanguage) -> String {
         switch self {
-        case .working: return "处理中"
-        case .done:    return "已完成"
-        case .failed:  return "出错"
+        case .working: return L10n.t(.capsuleWorking, lang)
+        case .done:    return L10n.t(.capsuleDone, lang)
+        case .failed:  return L10n.t(.capsuleFailed, lang)
         }
     }
 

@@ -24,7 +24,7 @@ final class PartialReviewParserTests: XCTestCase {
     // MARK: - corrected 逐字稳定前缀
 
     func testCorrectedPrefixAcrossChunks() {
-        let full = #"{"has_issues": true, "corrected": "I went there", "summary_zh": "ok"}"#
+        let full = #"{"has_issues": true, "corrected": "I went there", "summary": "ok"}"#
         // 任意切点：逐字符切
         var parser = PartialReviewParser()
         var prefixes: [String] = []
@@ -94,10 +94,10 @@ final class PartialReviewParserTests: XCTestCase {
 
     func testSummaryFilledOnlyWhenClosed() {
         var parser = PartialReviewParser()
-        _ = parser.feed(#"{"corrected": "ok", "summary_zh": "未闭合"#)
-        XCTAssertNil(parser.snapshot(stage: .receiving).summaryZh)   // 字符串未闭合 → 不填
+        _ = parser.feed(#"{"corrected": "ok", "summary": "未闭合"#)
+        XCTAssertNil(parser.snapshot(stage: .receiving).summary)   // 字符串未闭合 → 不填
         _ = parser.feed(#""}"#)
-        XCTAssertEqual(parser.snapshot(stage: .receiving).summaryZh, "未闭合")
+        XCTAssertEqual(parser.snapshot(stage: .receiving).summary, "未闭合")
     }
 
     func testAlternativeFilledWhenClosed() {
@@ -133,19 +133,19 @@ final class PartialReviewParserTests: XCTestCase {
 
     func testFieldsOutOfOrderCorrectedLate() {
         // corrected 晚到：先到 summary/issues，corrected 最后。preview 不崩，最终 corrected 正确。
-        let full = #"{"summary_zh": "s", "has_issues": true, "corrected": "late text"}"#
+        let full = #"{"summary": "s", "has_issues": true, "corrected": "late text"}"#
         let p = feedChunks(full, splits: [10, 25, 40])
         XCTAssertEqual(p.corrected, "late text")
-        XCTAssertEqual(p.summaryZh, "s")
+        XCTAssertEqual(p.summary, "s")
     }
 
     func testTextTierJSONScannedNotRawDumped() {
         // .text tier 仍是 JSON（本仓库事实）：累积的 JSON 文本不能整段当 corrected，
         // 必须扫描出 corrected 字段值。
-        let full = #"{"corrected": "just the field", "summary_zh": "x"}"#
+        let full = #"{"corrected": "just the field", "summary": "x"}"#
         let p = feedChunks(full, splits: [12, 30])
         XCTAssertEqual(p.corrected, "just the field")
-        XCTAssertFalse(p.corrected.contains("summary_zh"))
+        XCTAssertFalse(p.corrected.contains("summary"))
     }
 
     func testMalformedProducesNoCrashEmptyPreview() {
@@ -155,7 +155,7 @@ final class PartialReviewParserTests: XCTestCase {
         let p = parser.snapshot(stage: .receiving)
         XCTAssertEqual(p.corrected, "")
         XCTAssertTrue(p.issues.isEmpty)
-        XCTAssertNil(p.summaryZh)
+        XCTAssertNil(p.summary)
     }
 
     func testNoChangeReturnsNil() {
